@@ -10,9 +10,9 @@ SERVER_PORT = int(os.environ.get("PAPER_SERVER_PORT", 3475))
 SERVER_DEBUG = os.environ.get("PAPER_SERVER_DEBUG", "false").lower() == "true"
 
 # ── LLM / OpenAI 兼容 API ────────────────────────────────────────────────
-OPENAI_BASE_URL = os.environ.get("PAPER_OPENAI_BASE_URL", "http://127.0.0.1:7861")
+OPENAI_BASE_URL = os.environ.get("PAPER_OPENAI_BASE_URL", "")
 OPENAI_API_KEY = os.environ.get("PAPER_OPENAI_API_KEY", "your-api-key-here")
-OPENAI_MODEL = os.environ.get("PAPER_OPENAI_MODEL", "gemini-3-pro-preview")
+OPENAI_MODEL = os.environ.get("PAPER_OPENAI_MODEL", "")
 FILTER_PROMPT = os.environ.get("PAPER_FILTER_PROMPT", """你是一个凝聚态物理专家。任务：
 1. 判定列表中的论文是否与"输运(transport)"或"电子输运"研究相关。相关返回 is_transport=true，否则 false。
 2. 若相关，必须把英文标题和英文摘要精准且完整地翻译为流畅的学术中文。
