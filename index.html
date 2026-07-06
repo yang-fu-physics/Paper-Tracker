@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>论文浏览</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/css/style.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+</head>
+<body>
+<header>
+  <h1>论文浏览</h1>
+  <div class="search-box">
+    <input type="text" id="search-input" class="search-input" placeholder="输入关键字全局搜索...">
+    <button id="btn-search">搜索</button>
+  </div>
+
+  <div class="date-controls" style="margin-left:auto;">
+    <button id="btn-prev">← 前一天</button>
+    <button id="btn-open-cal" class="date-picker" style="font-size:0.9rem;">🗓️ <span id="current-date-text">全景日历</span></button>
+    <button id="btn-next">后一天 →</button>
+  </div>
+</header>
+<div class="filter-bar" id="filter-bar">
+  <span>全局筛选与分类：</span>
+  <button class="f-btn active" data-filter="all">全部 (按天)</button>
+  <button class="f-btn" data-filter="相关">相关</button>
+  <button class="f-btn" data-filter="感兴趣">感兴趣</button>
+  <button class="f-btn" data-filter="组会报告">组会报告</button>
+  <button class="f-btn" data-filter="不相关">不相关</button>
+</div>
+<main id="main">
+  <div class="grid-container">
+    <div class="skeleton-card">
+      <div class="sk-title"></div>
+      <div class="sk-line"></div>
+      <div class="sk-line"></div>
+      <div class="sk-line short"></div>
+    </div>
+  </div>
+</main>
+
+<!-- Hidden input for card-specific uploads -->
+<input type="file" id="card-upload-input" accept=".pdf" style="display:none;">
+
+<!-- Fullscreen Calendar Modal -->
+<div id="calendar-modal" class="modal">
+  <div class="modal-content">
+    <div class="modal-header">
+       <h2><button id="cal-prev-year" class="cal-nav">&lt;</button> <span id="cal-year">2026</span> <button id="cal-next-year" class="cal-nav">&gt;</button></h2>
+       <button class="close-btn" id="cal-close">&times;</button>
+    </div>
+    <div class="modal-body" id="cal-body"></div>
+  </div>
+</div>
+
+<script src="/static/js/app.js"></script>
+</body>
+</html>
