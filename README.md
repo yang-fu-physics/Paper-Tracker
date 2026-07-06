@@ -29,10 +29,11 @@ paper-web/
 ├── config.py           # 全局配置（环境变量驱动，已 gitignore）
 ├── import.py           # 历史数据导入工具
 ├── index.html          # 前端主页面
+├── data/               # SQLite 数据库与上传的 PDF 文件
+├── downloads/          # LaTeX 源码与翻译过程的临时文件
 ├── static/
 │   ├── css/style.css   # 样式（含暗色模式）
 │   └── js/app.js       # 前端交互逻辑
-├── .env.example        # 环境变量模板
 ├── requirements.txt    # Python 依赖
 └── .gitignore
 ```
@@ -109,8 +110,6 @@ RSS 源 ──抓取──→ 全量论文列表
      ↓             ↓
   相关论文      不相关论文
   (推送到前端)   (仅记录评估结果)
-     │
-  自动下载 PR PDF（如适用）
 ```
 
 ### 论文翻译流程
@@ -123,7 +122,6 @@ arXiv 论文:  LaTeX 源码 → 翻译 → XeLaTeX 编译 → 中文 PDF
 ## ⚠️ 注意事项
 
 - **API 报错重试**：如果 LLM API 在筛选过程中报错，失败的论文不会写入数据库，下次抓取时会自动重试（前提是论文仍在 RSS 源中，通常保留 3 天）
-- **API Key 安全**：所有敏感信息通过环境变量注入，切勿直接在代码中硬编码或提交到版本库
 - **LaTeX 环境**：PDF 全文翻译功能需要安装 XeLaTeX（TeX Live / MiKTeX），未安装时翻译功能不可用
 
 ## 📝 License
