@@ -13,6 +13,24 @@ SERVER_DEBUG = os.environ.get("PAPER_SERVER_DEBUG", "false").lower() == "true"
 OPENAI_BASE_URL = os.environ.get("PAPER_OPENAI_BASE_URL", "http://127.0.0.1:7861")
 OPENAI_API_KEY = os.environ.get("PAPER_OPENAI_API_KEY", "your-api-key-here")
 OPENAI_MODEL = os.environ.get("PAPER_OPENAI_MODEL", "gemini-3-pro-preview")
+FILTER_PROMPT = os.environ.get("PAPER_FILTER_PROMPT", """你是一个凝聚态物理专家。任务：
+1. 判定列表中的论文是否与"输运(transport)"或"电子输运"研究相关。相关返回 is_transport=true，否则 false。
+2. 若相关，必须把英文标题和英文摘要精准且完整地翻译为流畅的学术中文。
+3. 提供一个 150 字以内的中文总结 summary_zh。
+
+要求仅返回严格格式的 JSON 数据，格式如下：
+{
+  "results": [
+    {
+      "index": <整数，原列表序号>,
+      "is_transport": <布尔值>,
+      "title_zh": "<如果相关则提供中文标题>",
+      "summary_zh": "<中文核心总结，150字以内>",
+      "abstract_zh": "<完整客观的全文翻译>"
+    }
+  ]
+}
+不要返回 json 之外的任何 Markdown。""")
 
 # ── doc2x（PDF → LaTeX 转换服务）────────────────────────────────────────
 DOC2X_API_KEY = os.environ.get("PAPER_DOC2X_API_KEY", "your-doc2x-api-key-here")

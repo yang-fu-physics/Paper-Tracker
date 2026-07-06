@@ -209,25 +209,6 @@ async def fetch_all_papers() -> List[Dict]:
 
 # ── AI 判定逻辑 ────────────────────────────────────────────────────────
 
-_SYSTEM_PROMPT = """你是一个凝聚态物理专家。任务：
-1. 判定列表中的论文是否与"输运(transport)"或"电子输运"研究相关。相关返回 is_transport=true，否则 false。
-2. 若相关，必须把英文标题和英文摘要精准且完整地翻译为流畅的学术中文。
-3. 提供一个 150 字以内的中文总结 summary_zh。
-
-要求仅返回严格格式的 JSON 数据，格式如下：
-{
-  "results": [
-    {
-      "index": <整数，原列表序号>,
-      "is_transport": <布尔值>,
-      "title_zh": "<如果相关则提供中文标题>",
-      "summary_zh": "<中文核心总结，150字以内>",
-      "abstract_zh": "<完整客观的全文翻译>"
-    }
-  ]
-}
-不要返回 json 之外的任何 Markdown。"""
-
 async def _process_batch(
     papers_batch: List[Dict], start_idx: int, base_url: str, api_key: str, model: str
 ) -> Tuple[List[Dict], List[str]]:
@@ -239,7 +220,7 @@ async def _process_batch(
     payload = {
         "model": model,
         "messages": [
-            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "system", "content": config.FILTER_PROMPT},
             {"role": "user", "content": user_content},
         ],
         "temperature": 0.3,

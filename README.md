@@ -1,4 +1,4 @@
-# 📄 Paper-Web — 凝聚态物理论文自动追踪与翻译平台
+# 📄 Paper-Tracker — 凝聚态物理论文自动追踪与翻译平台
 
 自动从主流物理学期刊 RSS 源抓取最新论文，利用大语言模型（LLM）进行智能筛选、摘要翻译与分类，并提供美观的 Web 界面进行浏览、标注和 PDF 全文翻译。
 
@@ -42,8 +42,8 @@ paper-web/
 ### 1. 克隆项目
 
 ```bash
-git clone https://github.com/your-username/paper-web.git
-cd paper-web
+git clone https://github.com/your-username/paper-tracker.git
+cd paper-tracker
 ```
 
 ### 2. 安装依赖
