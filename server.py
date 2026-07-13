@@ -220,19 +220,28 @@ def filter_papers():
         like1 = f"{label},%"
         like2 = f"%,{label},%"
         like3 = f"%,{label}"
-        q = """
+        type_filter = ""
+        type_params = ()
+        paper_type = request.args.get("paper_type", "")
+        if paper_type == "arxiv":
+            type_filter = " AND p.journal LIKE 'arXiv:%'"
+        elif paper_type == "journal":
+            type_filter = " AND p.journal NOT LIKE 'arXiv:%'"
+
+        q = f"""
             SELECT p.url, p.journal, p.title, p.pushed_at,
                    e.title_zh, e.abstract_zh, e.summary_zh, e.abstract_en
             FROM pushed_papers p
             JOIN ldb.paper_labels l ON p.url = l.url
             LEFT JOIN paper_evaluations e ON p.url = e.url
-            WHERE l.label = ? OR l.label LIKE ? OR l.label LIKE ? OR l.label LIKE ?
+            WHERE (l.label = ? OR l.label LIKE ? OR l.label LIKE ? OR l.label LIKE ?)
+            {type_filter}
             ORDER BY p.pushed_at DESC
             LIMIT ? OFFSET ?
         """
         rows = pc.execute(q, (label, like1, like2, like3, limit, offset)).fetchall()
         
-        q_count = "SELECT COUNT(*) FROM ldb.paper_labels WHERE label = ? OR label LIKE ? OR label LIKE ? OR label LIKE ?"
+        q_count = f"SELECT COUNT(*) FROM ldb.paper_labels l JOIN pushed_papers p ON p.url = l.url WHERE (l.label = ? OR l.label LIKE ? OR l.label LIKE ? OR l.label LIKE ?) {type_filter}"
         total = pc.execute(q_count, (label, like1, like2, like3)).fetchone()[0]
         has_next = (offset + limit) < total
         translations = {k: v["status"] for k, v in _translate_jobs.items()}
@@ -272,31 +281,40 @@ def search_papers():
     with papers_conn() as pc:
         pc.execute("ATTACH DATABASE ? AS ldb", (str(LABELS_DB),))
         
+        type_filter = ""
+        paper_type = request.args.get("paper_type", "")
+        if paper_type == "arxiv":
+            type_filter = " AND p.journal LIKE 'arXiv:%'"
+        elif paper_type == "journal":
+            type_filter = " AND p.journal NOT LIKE 'arXiv:%'"
+
         like_str = f"%{q_str}%"
-        q_sql = """
+        q_sql = f"""
             SELECT p.url, p.journal, p.title, p.pushed_at,
                    e.title_zh, e.abstract_zh, e.summary_zh, e.abstract_en,
                    IFNULL(l.label, '不相关') as label
             FROM pushed_papers p
             LEFT JOIN paper_evaluations e ON p.url = e.url
             LEFT JOIN ldb.paper_labels l ON p.url = l.url
-            WHERE p.title LIKE ? 
+            WHERE (p.title LIKE ? 
                OR p.journal LIKE ?
                OR e.title_zh LIKE ?
                OR e.abstract_zh LIKE ?
                OR e.summary_zh LIKE ?
-               OR e.abstract_en LIKE ?
+               OR e.abstract_en LIKE ?)
+               {type_filter}
             ORDER BY p.pushed_at DESC
             LIMIT ? OFFSET ?
         """
         params = (like_str, like_str, like_str, like_str, like_str, like_str, limit, offset)
         rows = pc.execute(q_sql, params).fetchall()
         
-        q_count = """
+        q_count = f"""
             SELECT COUNT(*) 
             FROM pushed_papers p
             LEFT JOIN paper_evaluations e ON p.url = e.url
-            WHERE p.title LIKE ? OR p.journal LIKE ? OR e.title_zh LIKE ? OR e.abstract_zh LIKE ? OR e.summary_zh LIKE ? OR e.abstract_en LIKE ?
+            WHERE (p.title LIKE ? OR p.journal LIKE ? OR e.title_zh LIKE ? OR e.abstract_zh LIKE ? OR e.summary_zh LIKE ? OR e.abstract_en LIKE ?)
+            {type_filter}
         """
         total = pc.execute(q_count, (like_str, like_str, like_str, like_str, like_str, like_str)).fetchone()[0]
         has_next = (offset + limit) < total

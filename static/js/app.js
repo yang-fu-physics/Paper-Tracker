@@ -5,9 +5,12 @@ let currentDateStr = '';
 let currentMode = 'date'; // 'date', 'filter', 'search'
 let currentLabel = 'all';
 let currentSearch = '';
-let currentPage = 1;
-let isLoading = false;
-let hasNextFlag = false;
+let currentPage = 1; // Used for date view if needed, actually date view doesn't use it.
+let currentJournalsPage = 1;
+let currentArxivsPage = 1;
+let isJournalsLoading = false;
+let isArxivsLoading = false;
+let isLoading = false; // Kept for compatibility just in case
 let papersList = []; // For rendering cards
 
 const mainEl = document.getElementById('main');
@@ -136,103 +139,126 @@ async function loadDatePapers() {
   });
 }
 
-async function loadFilterOrSearch(reset = true) {
-  if (isLoading) return;
+async function loadPapersByType(type, reset = false) {
+  if (type === 'journal' && isJournalsLoading) return;
+  if (type === 'arxiv' && isArxivsLoading) return;
+  
+  if (type === 'journal') isJournalsLoading = true;
+  if (type === 'arxiv') isArxivsLoading = true;
+
   if (reset) {
-    currentPage = 1;
-    papersList = [];
-    showSkeleton();
+    if (type === 'journal') currentJournalsPage = 1;
+    if (type === 'arxiv') currentArxivsPage = 1;
   } else {
-    const btn = document.getElementById('load-more-btn');
+    const btn = document.getElementById(`load-more-btn-${type}`);
     if (btn) btn.innerHTML = '<span class="spinner"></span> 加载中...';
   }
 
-  isLoading = true;
   let url = '';
+  let page = type === 'journal' ? currentJournalsPage : currentArxivsPage;
+
   if (currentMode === 'filter') {
-    url = `/filter?label=${encodeURIComponent(currentLabel)}&page=${currentPage}`;
+    url = `/filter?label=${encodeURIComponent(currentLabel)}&page=${page}&paper_type=${type}`;
   } else if (currentMode === 'search') {
-    url = `/search?q=${encodeURIComponent(currentSearch)}&page=${currentPage}`;
+    url = `/search?q=${encodeURIComponent(currentSearch)}&page=${page}&paper_type=${type}`;
   }
 
   try {
     const res = await fetch(url).then(r => r.json());
     const papers = res.papers || [];
-    hasNextFlag = res.has_next || false;
+    const hasNextFlag = res.has_next || false;
 
-    if (reset) mainEl.innerHTML = '';
-
-    let journalsSection = document.getElementById('journals-section');
-    let arxivsSection = document.getElementById('arxivs-section');
-    let journalsGrid = document.getElementById('journals-grid');
-    let arxivsGrid = document.getElementById('arxivs-grid');
-
-    if (!journalsSection) {
-      if (currentMode === 'search') mainEl.insertAdjacentHTML('beforeend', '<div class="section-title">搜索结果 (按时间倒序)</div>');
-      else if (currentMode === 'filter') mainEl.insertAdjacentHTML('beforeend', `<div class="section-title">筛选: ${currentLabel} (按时间倒序)</div>`);
-
-      journalsSection = document.createElement('div');
-      journalsSection.id = 'journals-section';
-      journalsSection.style.display = 'none';
-      journalsSection.innerHTML = '<div class="section-title">期刊论文</div>';
-      journalsGrid = document.createElement('div');
-      journalsGrid.id = 'journals-grid';
-      journalsGrid.className = 'grid-container';
-      journalsSection.appendChild(journalsGrid);
-      mainEl.appendChild(journalsSection);
-
-      arxivsSection = document.createElement('div');
-      arxivsSection.id = 'arxivs-section';
-      arxivsSection.style.display = 'none';
-      arxivsSection.innerHTML = '<div class="section-title">arXiv 预印本</div>';
-      arxivsGrid = document.createElement('div');
-      arxivsGrid.id = 'arxivs-grid';
-      arxivsGrid.className = 'grid-container';
-      arxivsSection.appendChild(arxivsGrid);
-      mainEl.appendChild(arxivsSection);
-    }
+    let section = document.getElementById(`${type}s-section`);
+    let grid = document.getElementById(`${type}s-grid`);
 
     if (reset && !papers.length) {
-      mainEl.innerHTML = currentMode === 'search'
-        ? '<div id="empty">未找到匹配的结果 🍃</div>'
-        : '<div id="empty">暂未找到该标签下的论文 🍃</div>';
-      return;
+      if (section) section.style.display = 'none';
+      if (grid) grid.innerHTML = '';
+      const oldLoadCtn = document.getElementById(`load-more-ctn-${type}`);
+      if (oldLoadCtn) oldLoadCtn.remove();
+    } else if (papers.length) {
+      if (section) {
+         section.style.display = 'block';
+         if (reset) grid.innerHTML = '';
+      }
+      
+      papers.forEach(p => {
+        const dateStr = p.pushed_at ? p.pushed_at.split('T')[0] : '';
+        const originalJournal = p.journal;
+        p.journal = dateStr ? `[${dateStr}] ${originalJournal}` : originalJournal;
+        
+        const card = makeCard(p);
+        grid.appendChild(card);
+      });
     }
 
-    papers.forEach(p => {
-      const dateStr = p.pushed_at ? p.pushed_at.split('T')[0] : '';
-      const originalJournal = p.journal;
-      p.journal = dateStr ? `[${dateStr}] ${originalJournal}` : originalJournal;
-      
-      const card = makeCard(p);
-      if (p.is_arxiv) {
-        arxivsSection.style.display = 'block';
-        arxivsGrid.appendChild(card);
-      } else {
-        journalsSection.style.display = 'block';
-        journalsGrid.appendChild(card);
-      }
-    });
-
-    // Handle load more button
-    const oldLoadCtn = document.getElementById('load-more-ctn');
+    const oldLoadCtn = document.getElementById(`load-more-ctn-${type}`);
     if (oldLoadCtn) oldLoadCtn.remove();
 
     if (hasNextFlag) {
       const loadCtn = document.createElement('div');
-      loadCtn.id = 'load-more-ctn';
+      loadCtn.id = `load-more-ctn-${type}`;
       loadCtn.className = 'load-more-ctn';
-      loadCtn.innerHTML = '<button id="load-more-btn" style="width:200px;">加载下一页</button>';
-      mainEl.appendChild(loadCtn);
-      document.getElementById('load-more-btn').addEventListener('click', () => {
-        currentPage++;
-        loadFilterOrSearch(false);
+      loadCtn.innerHTML = `<button id="load-more-btn-${type}" style="width:200px;">加载下一页</button>`;
+      section.appendChild(loadCtn);
+      document.getElementById(`load-more-btn-${type}`).addEventListener('click', () => {
+        if (type === 'journal') currentJournalsPage++;
+        else currentArxivsPage++;
+        loadPapersByType(type, false);
       });
     }
   } catch (e) {
-    if (reset) mainEl.innerHTML = `<div id="empty">加载失败: ${e}</div>`;
+     console.error(e);
   }
-  isLoading = false;
+  
+  if (type === 'journal') isJournalsLoading = false;
+  if (type === 'arxiv') isArxivsLoading = false;
+}
+
+async function loadFilterOrSearch(reset = true) {
+  if (reset) {
+    currentJournalsPage = 1;
+    currentArxivsPage = 1;
+    showSkeleton();
+    
+    mainEl.innerHTML = '';
+    if (currentMode === 'search') mainEl.insertAdjacentHTML('beforeend', '<div class="section-title">搜索结果 (按时间倒序)</div>');
+    else if (currentMode === 'filter') mainEl.insertAdjacentHTML('beforeend', `<div class="section-title">筛选: ${currentLabel} (按时间倒序)</div>`);
+
+    const journalsSection = document.createElement('div');
+    journalsSection.id = 'journals-section';
+    journalsSection.style.display = 'none';
+    journalsSection.innerHTML = '<div class="section-title">期刊论文</div>';
+    const journalsGrid = document.createElement('div');
+    journalsGrid.id = 'journals-grid';
+    journalsGrid.className = 'grid-container';
+    journalsSection.appendChild(journalsGrid);
+    mainEl.appendChild(journalsSection);
+
+    const arxivsSection = document.createElement('div');
+    arxivsSection.id = 'arxivs-section';
+    arxivsSection.style.display = 'none';
+    arxivsSection.innerHTML = '<div class="section-title">arXiv 预印本</div>';
+    const arxivsGrid = document.createElement('div');
+    arxivsGrid.id = 'arxivs-grid';
+    arxivsGrid.className = 'grid-container';
+    arxivsSection.appendChild(arxivsGrid);
+    mainEl.appendChild(arxivsSection);
+
+    await Promise.all([
+      loadPapersByType('journal', true),
+      loadPapersByType('arxiv', true)
+    ]);
+    
+    if (journalsSection.style.display === 'none' && arxivsSection.style.display === 'none') {
+       mainEl.innerHTML = currentMode === 'search'
+        ? '<div id="empty">未找到匹配的结果 🍃</div>'
+        : '<div id="empty">暂未找到该标签下的论文 🍃</div>';
+    }
+  } else {
+    // If not reset, we don't call this globally anymore.
+    // Pagination handles itself via button listeners calling loadPapersByType.
+  }
 }
 
 function makeCard(p) {
