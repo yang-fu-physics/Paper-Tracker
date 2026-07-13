@@ -29,7 +29,7 @@ BASE = Path(__file__).parent
 app = Flask(__name__, static_folder=str(BASE / "static"), static_url_path="/static")
 PAPERS_DB = BASE / "data" / "papers.db"
 LABELS_DB = BASE / "data" / "labels.db"
-VALID_LABELS = {"相关", "感兴趣", "组会报告", "不相关"}
+VALID_LABELS = {"相关", "感兴趣", "可做", "组会报告", "不相关"}
 UPLOAD_DIR = BASE / "data" / "uploads"
 
 async def _run_sync_pipeline():

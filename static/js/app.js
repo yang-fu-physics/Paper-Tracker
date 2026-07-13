@@ -1,4 +1,4 @@
-const LABELS = ['相关', '感兴趣', '组会报告', '不相关'];
+const LABELS = ['相关', '感兴趣', '可做', '组会报告', '不相关'];
 let dates = [];
 let readDatesSet = new Set();
 let currentDateStr = '';
@@ -417,12 +417,12 @@ async function onLabel(e) {
   
   if (currentLabels.includes(clickedLabel)) {
     currentLabels = currentLabels.filter(l => l !== clickedLabel);
-    if (clickedLabel === '感兴趣' && currentLabels.includes('组会报告')) {
-       currentLabels = currentLabels.filter(l => l !== '组会报告');
+    if (clickedLabel === '感兴趣') {
+       currentLabels = currentLabels.filter(l => l !== '组会报告' && l !== '可做');
     }
   } else {
     currentLabels.push(clickedLabel);
-    if (clickedLabel === '组会报告' && !currentLabels.includes('感兴趣')) {
+    if ((clickedLabel === '组会报告' || clickedLabel === '可做') && !currentLabels.includes('感兴趣')) {
       currentLabels.push('感兴趣');
     }
     if (clickedLabel === '不相关') {

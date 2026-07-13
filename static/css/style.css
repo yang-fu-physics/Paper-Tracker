@@ -99,6 +99,7 @@ main { max-width: 1500px; margin: 30px auto; padding: 0 24px; padding-bottom: 60
 .lbl:hover { background: #e2e8f0; color: #4a5568; }
 .lbl.active-相关 { background: #d1fae5; color: #065f46; box-shadow: 0 0 0 1px #a7f3d0 inset; }
 .lbl.active-感兴趣 { background: #dbeafe; color: #1e40af; box-shadow: 0 0 0 1px #bfdbfe inset; }
+.lbl.active-可做 { background: #f3e8ff; color: #7e22ce; box-shadow: 0 0 0 1px #e9d5ff inset; }
 .lbl.active-组会报告 { background: #fef3c7; color: #92400e; box-shadow: 0 0 0 1px #fde68a inset; }
 .lbl.active-不相关 { background: #fee2e2; color: #b91c1c; box-shadow: 0 0 0 1px #fecaca inset; }
 
@@ -202,6 +203,7 @@ main { max-width: 1500px; margin: 30px auto; padding: 0 24px; padding-bottom: 60
   .f-btn.active { background: #3182ce; color: #fff; }
   .lbl.active-相关 { background: #065f46; color: #d1fae5; box-shadow: 0 0 0 1px #047857 inset; }
   .lbl.active-感兴趣 { background: #1e40af; color: #dbeafe; box-shadow: 0 0 0 1px #1d4ed8 inset; }
+  .lbl.active-可做 { background: #6b21a8; color: #f3e8ff; box-shadow: 0 0 0 1px #9333ea inset; }
   .lbl.active-组会报告 { background: #92400e; color: #fef3c7; box-shadow: 0 0 0 1px #b45309 inset; }
   .lbl.active-不相关 { background: #991b1b; color: #fee2e2; box-shadow: 0 0 0 1px #b91c1c inset; }
 
