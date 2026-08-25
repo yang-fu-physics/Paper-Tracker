@@ -69,9 +69,12 @@ cp config.example.py config.py
 | 配置项 | 说明 | 默认值 |
 |--------|------|--------|
 | `SERVER_PORT` | Web 服务端口 | `3475` |
-| `OPENAI_BASE_URL` | LLM API 地址（OpenAI 兼容） | — |
-| `OPENAI_API_KEY` | LLM API 密钥 | — |
-| `OPENAI_MODEL` | 模型名称 | — |
+| `FILTER_BASE_URL` | 筛选用的 LLM API 地址（OpenAI 兼容） | — |
+| `FILTER_API_KEY` | 筛选用的 LLM API 密钥 | — |
+| `FILTER_MODEL` | 筛选用的 模型名称 | — |
+| `TRANSLATE_BASE_URL` | 翻译用的 LLM API 地址（OpenAI 兼容） | — |
+| `TRANSLATE_API_KEY` | 翻译用的 LLM API 密钥 | — |
+| `TRANSLATE_MODEL` | 翻译用的 模型名称 | — |
 | `DOC2X_API_KEY` | doc2x API 密钥（PDF→LaTeX） | — |
 | `DAILY_FETCH_HOUR` | 每日抓取时间（北京时间） | `9` |
 | `RECENT_DAYS` | RSS 保留天数 | `3` |

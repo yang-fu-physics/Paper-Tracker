@@ -10,7 +10,8 @@ import logging
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 import hashlib
-from flask import Flask, jsonify, request, send_from_directory, send_file
+import secrets
+from flask import Flask, Response, jsonify, request, send_from_directory, send_file
 from werkzeug.utils import secure_filename
 from scraper import fetch_all_papers, filter_and_translate
 import config
@@ -32,6 +33,25 @@ LABELS_DB = BASE / "data" / "labels.db"
 VALID_LABELS = {"相关", "感兴趣", "可做", "组会报告", "不相关"}
 UPLOAD_DIR = BASE / "data" / "uploads"
 
+
+@app.before_request
+def require_password():
+    """Protect the entire site with browser-native HTTP Basic Auth."""
+    auth = request.authorization
+    username = auth.username if auth else ""
+    password = auth.password if auth else ""
+    username_ok = secrets.compare_digest(username, config.ACCESS_USERNAME)
+    password_ok = bool(config.ACCESS_PASSWORD) and secrets.compare_digest(
+        password, config.ACCESS_PASSWORD
+    )
+    if username_ok and password_ok:
+        return None
+    return Response(
+        "Authentication required",
+        401,
+        {"WWW-Authenticate": 'Basic realm="Paper Web", charset="UTF-8"'},
+    )
+
 async def _run_sync_pipeline():
     print("Fetching all papers via standalone scraper...")
     all_papers = await fetch_all_papers()
@@ -48,7 +68,7 @@ async def _run_sync_pipeline():
         
     print(f"Running AI loop against {len(papers_to_process)} papers...")
     evaluated_papers, errors = await filter_and_translate(
-        papers_to_process, config.OPENAI_BASE_URL, config.OPENAI_API_KEY, config.OPENAI_MODEL
+        papers_to_process, config.FILTER_BASE_URL, config.FILTER_API_KEY, config.FILTER_MODEL
     )
     if errors:
         print(f"AI Errors: {errors}")

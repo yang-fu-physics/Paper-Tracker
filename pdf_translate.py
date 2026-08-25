@@ -120,7 +120,7 @@ def _restore_masks(content: str, blocks: list):
 def _translate_chunk(chunk: str, idx: int, total: int, max_retries: int = 3) -> str:
     logger.info(f"[translate] chunk {idx+1}/{total} ({len(chunk)} chars)")
     payload = {
-        "model": config.OPENAI_MODEL,
+        "model": config.TRANSLATE_MODEL,
         "messages": [
             {"role": "system", "content": "You are a professional academic translator. Translate the following LaTeX content from English to Chinese. Rules: 1) Do NOT modify any LaTeX commands, environments, or math formulas. 2) Answer ONLY with the translated text, do NOT wrap it in markdown code fences. 3) Maintain the original paragraph structure."},
             {"role": "user", "content": chunk}
@@ -131,8 +131,8 @@ def _translate_chunk(chunk: str, idx: int, total: int, max_retries: int = 3) -> 
     for attempt in range(1, max_retries + 1):
         try:
             r = requests.post(
-                f"{config.OPENAI_BASE_URL}/v1/chat/completions",
-                headers={"Authorization": f"Bearer {config.OPENAI_API_KEY}", "Content-Type": "application/json"},
+                f"{config.TRANSLATE_BASE_URL}/v1/chat/completions",
+                headers={"Authorization": f"Bearer {config.TRANSLATE_API_KEY}", "Content-Type": "application/json"},
                 json=payload,
                 timeout=(10, 120),  # (connect_timeout, read_timeout per chunk)
                 stream=True,
