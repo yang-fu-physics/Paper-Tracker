@@ -209,14 +209,120 @@ async def fetch_all_papers() -> List[Dict]:
 
 # ── AI 判定逻辑 ────────────────────────────────────────────────────────
 
+
+class ModelResponseError(ValueError):
+    """The model returned syntactically valid but incomplete batch data."""
+
+
+def _escape_invalid_json_backslashes(text: str) -> str:
+    """Repair bare backslashes inside JSON strings using math context.
+
+    Valid JSON escapes are always preserved in ordinary text. Ambiguous escapes
+    such as ``\\n`` or ``\\t`` are treated as LaTeX only inside ``$...$``,
+    ``\\(...\\)``, ``\\[...\\]``, or when a multi-letter command is followed by
+    a TeX argument/operator marker. Invalid JSON escapes are repaired anywhere.
+    """
+    out = []
+    i = 0
+    in_string = False
+    dollar_math = False
+    latex_math_depth = 0
+    hexdigits = set("0123456789abcdefABCDEF")
+    control_escapes = {"b", "f", "n", "r", "t"}
+    ascii_letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+    while i < len(text):
+        char = text[i]
+        if not in_string:
+            out.append(char)
+            if char == '"':
+                in_string = True
+                dollar_math = False
+                latex_math_depth = 0
+            i += 1
+            continue
+
+        if char == '"':
+            out.append(char)
+            in_string = False
+            dollar_math = False
+            latex_math_depth = 0
+            i += 1
+            continue
+        if char == "$":
+            out.append(char)
+            dollar_math = not dollar_math
+            i += 1
+            continue
+        if char != "\\":
+            out.append(char)
+            i += 1
+            continue
+        if i + 1 >= len(text):
+            out.append("\\\\")
+            i += 1
+            continue
+
+        nxt = text[i + 1]
+        if nxt in {'"', "\\", "/"}:
+            out.extend(("\\", nxt))
+            i += 2
+            continue
+        if nxt == "u" and i + 5 < len(text) and all(
+            ch in hexdigits for ch in text[i + 2 : i + 6]
+        ):
+            out.append(text[i : i + 6])
+            i += 6
+            continue
+        if nxt in "([":
+            latex_math_depth += 1
+            out.append("\\\\")
+            i += 1
+            continue
+        if nxt in ")]":
+            latex_math_depth = max(0, latex_math_depth - 1)
+            out.append("\\\\")
+            i += 1
+            continue
+        if nxt in control_escapes:
+            end = i + 2
+            while end < len(text) and text[end] in ascii_letters:
+                end += 1
+            token = text[i + 1 : end]
+            following = text[end] if end < len(text) else ""
+            in_math = dollar_math or latex_math_depth > 0
+            command_has_tex_marker = len(token) > 1 and following in "{[_^"
+            if not in_math and not command_has_tex_marker:
+                out.extend(("\\", nxt))
+                i += 2
+                continue
+
+        # Invalid JSON escape, or an ambiguous command in explicit TeX context.
+        out.append("\\\\")
+        i += 1
+
+    return "".join(out)
+
+
+def _parse_model_json(content: str) -> Dict:
+    content = content.strip()
+    match = re.search(r"\{[\s\S]*\}", content)
+    if match:
+        content = match.group(0)
+    repaired = _escape_invalid_json_backslashes(content)
+    return json.loads(repaired)
+
+
 async def _process_batch(
-    papers_batch: List[Dict], start_idx: int, base_url: str, api_key: str, model: str
-) -> Tuple[List[Dict], List[str]]:
+    papers_batch: List[Dict], start_idx: int, base_url: str, api_key: str, model: str,
+    *, max_attempts: int = None, base_delay: float = None,
+    client_factory=httpx.AsyncClient, sleep_func=asyncio.sleep,
+) -> Tuple[List[Dict], List[str], int]:
     texts = []
     for i, p in enumerate(papers_batch):
         texts.append(f"Index: {start_idx + i}\nTitle: {p['title']}\nAbstract: {p['abstract']}\n")
     user_content = "\n---\n".join(texts)
-    
+
     payload = {
         "model": model,
         "messages": [
@@ -225,55 +331,165 @@ async def _process_batch(
         ],
         "temperature": 0.3,
     }
-    
+
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    
-    evaluated_papers = []
-    errors = []
-    try:
-        async with httpx.AsyncClient(timeout=120) as client:
-            resp = await client.post(f"{base_url.rstrip('/')}/v1/chat/completions", json=payload, headers=headers)
-            resp.raise_for_status()
-            data = resp.json()
-            
-        content = data["choices"][0]["message"]["content"].strip()
-        m = re.search(r"\{[\s\S]*\}", content)
-        if m: content = m.group(0)
-        parsed = json.loads(content)
-        
-        for item in parsed.get("results", []):
-            idx = item.get("index", -1) - start_idx
-            if 0 <= idx < len(papers_batch):
-                paper = papers_batch[idx].copy()
+    if max_attempts is None:
+        max_attempts = getattr(config, "AI_MAX_ATTEMPTS", 5)
+    if base_delay is None:
+        base_delay = getattr(config, "AI_RETRY_BASE_DELAY", 2.0)
+    if max_attempts < 1:
+        raise ValueError("max_attempts must be at least 1")
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            async with client_factory(timeout=120) as client:
+                resp = await client.post(
+                    f"{base_url.rstrip('/')}/v1/chat/completions",
+                    json=payload,
+                    headers=headers,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+
+            if not isinstance(data, dict):
+                raise ModelResponseError("API response is not an object")
+            choices = data.get("choices")
+            if not isinstance(choices, list) or not choices:
+                raise ModelResponseError("API response has no choices")
+            choice = choices[0]
+            if not isinstance(choice, dict) or not isinstance(choice.get("message"), dict):
+                raise ModelResponseError("API response choice has no message object")
+            content = choice["message"].get("content")
+            if not isinstance(content, str) or not content.strip():
+                raise ModelResponseError("API response message content is empty or not a string")
+
+            parsed = _parse_model_json(content)
+            if not isinstance(parsed, dict):
+                raise ModelResponseError("model JSON root is not an object")
+            results = parsed.get("results")
+            if not isinstance(results, list):
+                raise ModelResponseError("response field 'results' is not a list")
+
+            expected_indexes = set(range(start_idx, start_idx + len(papers_batch)))
+            seen_indexes = set()
+            evaluated_papers = []
+            for item in results:
+                if not isinstance(item, dict):
+                    raise ModelResponseError("each result must be an object")
+                absolute_idx = item.get("index")
+                if type(absolute_idx) is not int:
+                    raise ModelResponseError(
+                        f"result index must be an integer, got {type(absolute_idx).__name__}"
+                    )
+                if absolute_idx not in expected_indexes or absolute_idx in seen_indexes:
+                    raise ModelResponseError(
+                        f"unexpected or duplicate result index: {absolute_idx!r}"
+                    )
                 is_trans = item.get("is_transport")
+                if type(is_trans) is not bool:
+                    raise ModelResponseError(
+                        f"is_transport for index {absolute_idx} must be a boolean"
+                    )
+                if is_trans:
+                    for field in ("title_zh", "summary_zh", "abstract_zh"):
+                        value = item.get(field)
+                        if not isinstance(value, str) or not value.strip():
+                            raise ModelResponseError(
+                                f"related result index {absolute_idx} has invalid {field}"
+                            )
+
+                seen_indexes.add(absolute_idx)
+                idx = absolute_idx - start_idx
+                paper = papers_batch[idx].copy()
                 paper["is_transport"] = 1 if is_trans else 0
                 if is_trans:
-                    paper["title_zh"] = item.get("title_zh", "")
-                    paper["summary_zh"] = item.get("summary_zh", "")
-                    paper["abstract_zh"] = item.get("abstract_zh", "")
-                paper["abstract_en"] = paper.get("abstract", "") # backup original
+                    paper["title_zh"] = item["title_zh"]
+                    paper["summary_zh"] = item["summary_zh"]
+                    paper["abstract_zh"] = item["abstract_zh"]
+                paper["abstract_en"] = paper.get("abstract", "")
                 evaluated_papers.append(paper)
-    except Exception as e:
-        logger.warning(f"Batch AI API failed: {e}")
-        errors.append(str(e))
-        
-    return evaluated_papers, errors
+            if seen_indexes != expected_indexes:
+                missing = sorted(expected_indexes - seen_indexes)
+                raise ModelResponseError(f"missing result indexes: {missing}")
+            return evaluated_papers, [], attempt - 1
+        except Exception as exc:
+            status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
+            retryable = (
+                status == 429
+                or (status is not None and 500 <= status <= 599)
+                or isinstance(
+                    exc, (httpx.RequestError, json.JSONDecodeError, ModelResponseError)
+                )
+            )
+            if retryable and attempt < max_attempts:
+                delay = base_delay * (2 ** (attempt - 1))
+                logger.warning(
+                    "Batch %s-%s attempt %s/%s failed (%s); retrying in %.1fs",
+                    start_idx,
+                    start_idx + len(papers_batch) - 1,
+                    attempt,
+                    max_attempts,
+                    exc,
+                    delay,
+                )
+                await sleep_func(delay)
+                continue
+            message = (
+                f"batch {start_idx}-{start_idx + len(papers_batch) - 1} "
+                f"failed after {attempt} attempt(s): {exc}"
+            )
+            logger.warning(message)
+            return [], [message], attempt - 1
+
+    raise AssertionError("unreachable")
 
 async def filter_and_translate(
-    papers: List[Dict], base_url: str, api_key: str, model: str, batch_size: int = 15
-) -> Tuple[List[Dict], List[str]]:
+    papers: List[Dict], base_url: str, api_key: str, model: str,
+    batch_size: int = 15, max_concurrency: int = None,
+) -> Tuple[List[Dict], List[str], Dict]:
+    if max_concurrency is None:
+        max_concurrency = getattr(config, "AI_MAX_CONCURRENCY", 2)
+    if type(max_concurrency) is not int or not 2 <= max_concurrency <= 4:
+        raise ValueError("max_concurrency must be an integer between 2 and 4")
+
+    semaphore = asyncio.Semaphore(max_concurrency)
+    batches = []
+
+    async def run_batch(batch: List[Dict], start_idx: int):
+        async with semaphore:
+            return await _process_batch(batch, start_idx, base_url, api_key, model)
+
     tasks = []
     for i in range(0, len(papers), batch_size):
         batch = papers[i : i + batch_size]
-        tasks.append(_process_batch(batch, i, base_url, api_key, model))
-        
+        batches.append(batch)
+        tasks.append(run_batch(batch, i))
+
     results = await asyncio.gather(*tasks, return_exceptions=True)
     final_evaluated, all_errors = [], []
-    for r in results:
-        if isinstance(r, tuple):
-            final_evaluated.extend(r[0])
-            all_errors.extend(r[1])
+    stats = {
+        "total_batches": len(batches),
+        "successful_batches": 0,
+        "failed_batches": 0,
+        "evaluated_papers": 0,
+        "retry_pending_papers": 0,
+        "retry_attempts": 0,
+    }
+    for batch, result in zip(batches, results):
+        if isinstance(result, tuple):
+            evaluated, errors, retry_attempts = result
+            final_evaluated.extend(evaluated)
+            all_errors.extend(errors)
+            stats["retry_attempts"] += retry_attempts
+            if errors:
+                stats["failed_batches"] += 1
+                stats["retry_pending_papers"] += len(batch)
+            else:
+                stats["successful_batches"] += 1
         else:
-            all_errors.append(str(r))
-            
-    return final_evaluated, all_errors
+            all_errors.append(str(result))
+            stats["failed_batches"] += 1
+            stats["retry_pending_papers"] += len(batch)
+    stats["evaluated_papers"] = len(final_evaluated)
+
+    return final_evaluated, all_errors, stats

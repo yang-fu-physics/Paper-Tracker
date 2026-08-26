@@ -56,45 +56,67 @@ async def _run_sync_pipeline():
     print("Fetching all papers via standalone scraper...")
     all_papers = await fetch_all_papers()
     if not all_papers:
+        print(
+            "PIPELINE_SUMMARY status=no_data fetched=0 new=0 evaluated=0 "
+            "related=0 successful_batches=0 failed_batches=0 retries=0 "
+            "retry_pending=0 errors=0"
+        )
         return
-    
+
     with papers_conn() as pc:
-        evaluated_urls = {r[0] for r in pc.execute("SELECT url FROM paper_evaluations").fetchall()}
-        
+        evaluated_urls = {
+            r[0] for r in pc.execute("SELECT url FROM paper_evaluations").fetchall()
+        }
+
     papers_to_process = [p for p in all_papers if p["url"] not in evaluated_urls]
     print(f"Total: {len(all_papers)}, New to process: {len(papers_to_process)}")
     if not papers_to_process:
+        print(
+            f"PIPELINE_SUMMARY status=noop fetched={len(all_papers)} new=0 evaluated=0 "
+            "related=0 successful_batches=0 failed_batches=0 retries=0 "
+            "retry_pending=0 errors=0"
+        )
         return
-        
+
     print(f"Running AI loop against {len(papers_to_process)} papers...")
-    evaluated_papers, errors = await filter_and_translate(
-        papers_to_process, config.FILTER_BASE_URL, config.FILTER_API_KEY, config.FILTER_MODEL
+    evaluated_papers, errors, stats = await filter_and_translate(
+        papers_to_process,
+        config.FILTER_BASE_URL,
+        config.FILTER_API_KEY,
+        config.FILTER_MODEL,
     )
-    if errors:
-        print(f"AI Errors: {errors}")
-        
+
     now_str = datetime.now(tz=timezone.utc).isoformat()
+    transport_papers = [p for p in evaluated_papers if p.get("is_transport") == 1]
     with papers_conn() as pc:
-        # 1. Insert ALL evaluated papers into paper_evaluations
         pc.executemany(
-            """INSERT OR REPLACE INTO paper_evaluations 
-            (url, is_transport, title_zh, abstract_zh, evaluated_at, summary_zh, abstract_en) 
+            """INSERT OR REPLACE INTO paper_evaluations
+            (url, is_transport, title_zh, abstract_zh, evaluated_at, summary_zh, abstract_en)
             VALUES (?,?,?,?,?,?,?)""",
             [(
-                p["url"], p.get("is_transport", 0), p.get("title_zh",""), p.get("abstract_zh",""),
-                now_str, p.get("summary_zh",""), p.get("abstract_en","")
-            ) for p in evaluated_papers]
+                p["url"], p.get("is_transport", 0), p.get("title_zh", ""),
+                p.get("abstract_zh", ""), now_str, p.get("summary_zh", ""),
+                p.get("abstract_en", ""),
+            ) for p in evaluated_papers],
         )
-        
-        # 2. Insert ONLY transport-related papers into pushed_papers
-        transport_papers = [p for p in evaluated_papers if p.get("is_transport") == 1]
         pc.executemany(
             "INSERT OR IGNORE INTO pushed_papers (url, journal, title, pushed_at) VALUES (?,?,?,?)",
-            [(p["url"], p["journal"], p["title"], now_str) for p in transport_papers]
+            [(p["url"], p["journal"], p["title"], now_str) for p in transport_papers],
         )
         pc.commit()
-        
-    print("Daily pipeline completed successfully.")
+
+    status = "success" if not errors and stats["retry_pending_papers"] == 0 else "partial"
+    print(
+        f"PIPELINE_SUMMARY status={status} fetched={len(all_papers)} "
+        f"new={len(papers_to_process)} evaluated={len(evaluated_papers)} "
+        f"related={len(transport_papers)} "
+        f"successful_batches={stats['successful_batches']} "
+        f"failed_batches={stats['failed_batches']} "
+        f"retries={stats['retry_attempts']} "
+        f"retry_pending={stats['retry_pending_papers']} errors={len(errors)}"
+    )
+    for number, error in enumerate(errors, 1):
+        print(f"PIPELINE_ERROR {number}/{len(errors)} {error}")
 
 def _daily_fetch_job():
     tz_cn = timezone(timedelta(hours=8))
