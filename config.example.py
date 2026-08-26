@@ -41,6 +41,12 @@ FILTER_PROMPT = os.environ.get("PAPER_FILTER_PROMPT", """你是一个凝聚态�
 }
 不要返回 json 之外的任何 Markdown。""")
 
+# ── AI 筛选可靠性 ─────────────────────────────────────────────────────────
+# 并发限制为 2–4，避免过高并发触发上游限流或耗尽本机资源。
+AI_MAX_CONCURRENCY = int(os.environ.get("PAPER_AI_MAX_CONCURRENCY", 2))
+AI_MAX_ATTEMPTS = int(os.environ.get("PAPER_AI_MAX_ATTEMPTS", 5))
+AI_RETRY_BASE_DELAY = float(os.environ.get("PAPER_AI_RETRY_BASE_DELAY", 2.0))
+
 # ── doc2x（PDF → LaTeX 转换服务）────────────────────────────────────────
 DOC2X_API_KEY = os.environ.get("PAPER_DOC2X_API_KEY", "your-doc2x-api-key-here")
 DOC2X_BASE_URL = os.environ.get("PAPER_DOC2X_BASE_URL", "https://v2.doc2x.noedgeai.com/api/v2")
