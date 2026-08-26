@@ -336,7 +336,7 @@ async def _process_batch(
     if max_attempts is None:
         max_attempts = getattr(config, "AI_MAX_ATTEMPTS", 5)
     if base_delay is None:
-        base_delay = getattr(config, "AI_RETRY_BASE_DELAY", 2.0)
+        base_delay = getattr(config, "AI_RETRY_BASE_DELAY", 10.0)
     if max_attempts < 1:
         raise ValueError("max_attempts must be at least 1")
 

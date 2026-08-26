@@ -77,7 +77,7 @@ cp config.example.py config.py
 | `TRANSLATE_MODEL` | 翻译用的模型名称 | — |
 | `AI_MAX_CONCURRENCY` | AI 筛选并发批次数（仅允许 2–4） | `2` |
 | `AI_MAX_ATTEMPTS` | 每个筛选批次的最大尝试次数 | `5` |
-| `AI_RETRY_BASE_DELAY` | 筛选重试指数退避基数（秒） | `2.0` |
+| `AI_RETRY_BASE_DELAY` | 筛选重试指数退避基数（秒） | `10.0` |
 | `DOC2X_API_KEY` | doc2x API 密钥（PDF→LaTeX） | — |
 | `DAILY_FETCH_HOUR` | 每日抓取时间（北京时间） | `9` |
 | `RECENT_DAYS` | RSS 保留天数 | `3` |
