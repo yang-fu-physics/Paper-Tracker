@@ -25,6 +25,13 @@ class AdminUiContractTests(unittest.TestCase):
         self.assertIn("删除原PDF", js)
         self.assertIn("btnManagement.addEventListener('click', toggleManageMode)", js)
 
+    def test_reload_actions_preserve_current_scroll_position(self):
+        js = (ROOT / "static/js/app.js").read_text(encoding="utf-8")
+        self.assertIn("function _restoreScrollPosition", js)
+        self.assertIn("window.scrollY", js)
+        self.assertIn("window.scrollTo", js)
+        self.assertIn("_reloadCurrentView({ preserveScroll: true })", js)
+
     def test_css_has_management_responsive_layout_hooks(self):
         css = (ROOT / "static/css/style.css").read_text(encoding="utf-8")
         self.assertIn(".management-panel", css)

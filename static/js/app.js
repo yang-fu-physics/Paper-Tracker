@@ -407,10 +407,37 @@ function returnToRss() {
   else fetchDates();
 }
 
-function _reloadCurrentView() {
-  if (currentView === 'manual') return loadManualPapers();
-  if (currentMode === 'filter' || currentMode === 'search') return loadFilterOrSearch(true);
-  return loadDatePapers();
+function _restoreScrollPosition(scrollX, scrollY) {
+  if (scrollY == null) return;
+  const restore = () => window.scrollTo(scrollX, scrollY);
+  requestAnimationFrame(() => {
+    restore();
+    // A second frame handles the browser's layout/scroll anchoring pass.
+    requestAnimationFrame(restore);
+  });
+}
+
+function _reloadCurrentView({ preserveScroll = false } = {}) {
+  const scrollSnapshot = preserveScroll ? {
+    x: window.scrollX,
+    y: window.scrollY,
+    minHeight: mainEl.style.minHeight,
+  } : null;
+  if (scrollSnapshot && mainEl.getBoundingClientRect().height > 0) {
+    mainEl.style.minHeight = `${mainEl.getBoundingClientRect().height}px`;
+  }
+
+  let reload;
+  if (currentView === 'manual') reload = loadManualPapers();
+  else if (currentMode === 'filter' || currentMode === 'search') reload = loadFilterOrSearch(true);
+  else reload = loadDatePapers();
+
+  return Promise.resolve(reload).finally(() => {
+    if (scrollSnapshot) {
+      mainEl.style.minHeight = scrollSnapshot.minHeight;
+      _restoreScrollPosition(scrollSnapshot.x, scrollSnapshot.y);
+    }
+  });
 }
 
 function toggleManageMode() {
@@ -418,7 +445,7 @@ function toggleManageMode() {
   btnManagement.textContent = manageMode ? '退出管理' : '管理';
   btnManagement.classList.toggle('active', manageMode);
   if (currentView === 'management') currentView = 'rss';
-  _reloadCurrentView();
+  _reloadCurrentView({ preserveScroll: true });
 }
 
 async function onCardDeleteUpload(event) {
@@ -429,7 +456,7 @@ async function onCardDeleteUpload(event) {
     const response = await fetch(`/api/admin/uploads/${encodeURIComponent(btn.dataset.jobId)}`, { method: 'DELETE' });
     const data = await response.json();
     if (!response.ok || !data.ok) throw new Error(data.error || '删除失败');
-    await _reloadCurrentView();
+    await _reloadCurrentView({ preserveScroll: true });
   } catch (error) {
     window.alert(`删除失败：${error.message || error}`);
     btn.disabled = false;
