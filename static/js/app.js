@@ -5,6 +5,9 @@ let currentDateStr = '';
 let currentMode = 'date'; // 'date', 'filter', 'search'
 let currentLabel = 'all';
 let currentSearch = '';
+let currentView = 'rss';
+let manageMode = false;
+let managementRefreshTimer = null;
 let currentPage = 1; // Used for date view if needed, actually date view doesn't use it.
 let currentJournalsPage = 1;
 let currentArxivsPage = 1;
@@ -24,6 +27,9 @@ const btnPrev = document.getElementById('btn-prev');
 const btnNext = document.getElementById('btn-next');
 const searchInput = document.getElementById('search-input');
 const btnSearch = document.getElementById('btn-search');
+const btnManagement = document.getElementById('btn-management');
+const btnManualPapers = document.getElementById('btn-manual-papers');
+const manualUploadInput = document.getElementById('manual-upload-input');
 
 function showSkeleton(count = 4) {
   mainEl.innerHTML = '<div class="grid-container">' +
@@ -261,100 +267,295 @@ async function loadFilterOrSearch(reset = true) {
   }
 }
 
+function _clearManagementRefresh() {
+  if (managementRefreshTimer) {
+    clearTimeout(managementRefreshTimer);
+    managementRefreshTimer = null;
+  }
+}
+
+function _setCategoryActive(filter) {
+  document.querySelectorAll('.f-btn').forEach(btn => btn.classList.toggle('active', btn.dataset.filter === filter));
+}
+
+function _setRssControls(visible) {
+  document.querySelector('.filter-bar').style.display = visible ? 'flex' : 'none';
+  document.querySelector('.date-nav-controls').style.display = visible ? 'inline-flex' : 'none';
+}
+
+function _managementStatusText(item) {
+  const metadata = item.source_type === 'manual'
+    ? `元数据：${item.metadata_status || '未开始'}${item.metadata_stage ? `（${item.metadata_stage}）` : ''}`
+    : '已有论文附件';
+  const full = `全文翻译：${item.status || '未开始'}`;
+  const error = item.metadata_error || item.error;
+  return `${metadata}；${full}${error ? `；错误：${esc(error)}` : ''}`;
+}
+
+function _renderManagementRows(uploads) {
+  if (!uploads.length) return '<div id="empty">暂无上传记录</div>';
+  return `<div class="management-list">${uploads.map(item => {
+    const manual = item.source_type === 'manual';
+    const originalHref = manual
+      ? `/download_original_pdf?job_id=${encodeURIComponent(item.job_id)}`
+      : `/download_original_pdf?url=${encodeURIComponent(item.paper_url)}`;
+    const translatedHref = manual
+      ? `/download_uploaded_pdf?job_id=${encodeURIComponent(item.job_id)}`
+      : `/download_uploaded_pdf?url=${encodeURIComponent(item.paper_url)}`;
+    const retry = item.can_retry_metadata
+      ? `<button class="management-retry-btn" data-job-id="${escAttr(item.job_id)}">重试识别</button>` : '';
+    const translated = item.translated_exists
+      ? `<a class="pdf-link" href="${escAttr(translatedHref)}" target="_blank">中文PDF</a>` : '';
+    const deleteDisabled = item.can_delete ? '' : ' disabled';
+    const deleteTitle = item.can_delete ? '' : '处理中，完成后才能删除';
+    const deleteButton = `<button class="management-delete-btn" data-job-id="${escAttr(item.job_id)}" data-source="${manual ? 'manual' : 'rss'}"${deleteDisabled} title="${escAttr(deleteTitle)}">删除</button>`;
+    return `<div class="management-row">
+      <div class="management-main"><strong>${esc(item.title || item.filename)}</strong>${item.title_zh ? `<span>${esc(item.title_zh)}</span>` : ''}<small>${esc(item.filename)} · ${manual ? '手动论文' : '已有论文附件'} · ${esc(item.created_at || '')}</small><small>${_managementStatusText(item)}</small></div>
+      <div class="management-actions"><a class="pdf-link" href="${escAttr(originalHref)}" target="_blank">原PDF</a>${translated}${retry}${deleteButton}</div>
+    </div>`;
+  }).join('')}</div>`;
+}
+
+async function loadManagement() {
+  currentView = 'management';
+  _setCategoryActive('');
+  _clearManagementRefresh();
+  _setRssControls(false);
+  mainEl.innerHTML = '<div class="management-panel"><div class="manual-upload-toolbar"><h2>上传管理</h2><button id="management-upload-btn">手动上传PDF</button></div><span class="spinner"></span> 加载中...</div>';
+  document.getElementById('management-upload-btn').addEventListener('click', () => manualUploadInput.click());
+  try {
+    const response = await fetch('/api/admin/uploads');
+    const data = await response.json();
+    const active = (data.uploads || []).some(item => !item.can_delete);
+    mainEl.innerHTML = `<div class="management-panel"><div class="manual-upload-toolbar"><h2>上传管理</h2><button id="management-upload-btn">手动上传PDF</button><button id="management-refresh-btn">刷新</button></div>${_renderManagementRows(data.uploads || [])}</div>`;
+    document.getElementById('management-upload-btn').addEventListener('click', () => manualUploadInput.click());
+    document.getElementById('management-refresh-btn').addEventListener('click', loadManagement);
+    document.querySelectorAll('.management-delete-btn').forEach(btn => btn.addEventListener('click', onManagementDelete));
+    document.querySelectorAll('.management-retry-btn').forEach(btn => btn.addEventListener('click', onManagementRetry));
+    if (active && currentView === 'management') {
+      managementRefreshTimer = setTimeout(loadManagement, 5000);
+    }
+  } catch (error) {
+    mainEl.innerHTML = `<div class="management-panel"><div class="error-box">管理列表加载失败：${esc(error.message || error)}<button id="management-refresh-btn">重试</button></div></div>`;
+    document.getElementById('management-refresh-btn').addEventListener('click', loadManagement);
+  }
+}
+
+async function onManagementDelete(event) {
+  const btn = event.currentTarget;
+  const manual = btn.dataset.source === 'manual';
+  const message = manual
+    ? '删除手动论文及其全部相关文件？此操作不可恢复。'
+    : '仅删除这个PDF附件，保留原论文和标签？';
+  if (!window.confirm(message)) return;
+  btn.disabled = true;
+  try {
+    const response = await fetch(`/api/admin/uploads/${encodeURIComponent(btn.dataset.jobId)}`, { method: 'DELETE' });
+    const data = await response.json();
+    if (!response.ok || !data.ok) throw new Error(data.error || '删除失败');
+    await loadManagement();
+  } catch (error) {
+    window.alert(`删除失败：${error.message || error}`);
+    btn.disabled = false;
+  }
+}
+
+async function onManagementRetry(event) {
+  const btn = event.currentTarget;
+  btn.disabled = true;
+  try {
+    const response = await fetch(`/api/admin/uploads/${encodeURIComponent(btn.dataset.jobId)}/process`, { method: 'POST' });
+    const data = await response.json();
+    if (!response.ok || !data.ok) throw new Error(data.error || '重试失败');
+    await loadManagement();
+  } catch (error) {
+    window.alert(`重试失败：${error.message || error}`);
+    btn.disabled = false;
+  }
+}
+
+async function loadManualPapers() {
+  currentView = 'manual';
+  _setCategoryActive('manual');
+  _clearManagementRefresh();
+  _setRssControls(false);
+  mainEl.innerHTML = '<div class="manual-upload-toolbar"><h2>手动上传论文</h2><button id="manual-upload-btn">上传PDF</button></div><span class="spinner"></span> 加载中...';
+  document.getElementById('manual-upload-btn').addEventListener('click', () => manualUploadInput.click());
+  try {
+    const response = await fetch('/api/manual-papers');
+    const data = await response.json();
+    mainEl.innerHTML = `<div class="manual-upload-toolbar"><h2>手动上传论文</h2><button id="manual-upload-btn">上传PDF</button><button id="manual-refresh-btn">刷新</button></div>${data.papers && data.papers.length ? `<div class="grid-container">${data.papers.map(p => '').join('')}</div>` : '<div id="empty">暂无已识别的手动论文</div>'}`;
+    document.getElementById('manual-upload-btn').addEventListener('click', () => manualUploadInput.click());
+    document.getElementById('manual-refresh-btn').addEventListener('click', loadManualPapers);
+    if (data.papers && data.papers.length) {
+      const grid = mainEl.querySelector('.grid-container');
+      data.papers.forEach(p => grid.appendChild(makeCard(p)));
+    }
+  } catch (error) {
+    mainEl.innerHTML = `<div class="error-box">手动论文加载失败：${esc(error.message || error)}<button id="manual-refresh-btn">重试</button></div>`;
+    document.getElementById('manual-refresh-btn').addEventListener('click', loadManualPapers);
+  }
+}
+
+function returnToRss() {
+  currentView = 'rss';
+  _setCategoryActive('all');
+  _clearManagementRefresh();
+  _setRssControls(true);
+  if (currentMode === 'date' && currentDateStr) loadDatePapers();
+  else if (currentMode === 'filter' || currentMode === 'search') loadFilterOrSearch(true);
+  else fetchDates();
+}
+
+function _reloadCurrentView() {
+  if (currentView === 'manual') return loadManualPapers();
+  if (currentMode === 'filter' || currentMode === 'search') return loadFilterOrSearch(true);
+  return loadDatePapers();
+}
+
+function toggleManageMode() {
+  manageMode = !manageMode;
+  btnManagement.textContent = manageMode ? '退出管理' : '管理';
+  btnManagement.classList.toggle('active', manageMode);
+  if (currentView === 'management') currentView = 'rss';
+  _reloadCurrentView();
+}
+
+async function onCardDeleteUpload(event) {
+  const btn = event.currentTarget;
+  if (!window.confirm('仅删除这个PDF附件，保留原论文和标签？')) return;
+  btn.disabled = true;
+  try {
+    const response = await fetch(`/api/admin/uploads/${encodeURIComponent(btn.dataset.jobId)}`, { method: 'DELETE' });
+    const data = await response.json();
+    if (!response.ok || !data.ok) throw new Error(data.error || '删除失败');
+    await _reloadCurrentView();
+  } catch (error) {
+    window.alert(`删除失败：${error.message || error}`);
+    btn.disabled = false;
+  }
+}
+
 function makeCard(p) {
   const div = document.createElement('div');
   div.className = 'card';
-  const arxivIdMatch = p.is_arxiv && p.url.includes('/abs/') ? p.url.match(/abs\/([^/?v]+)/) : null;
+  const isManual = p.source_type === 'manual';
+  const arxivIdMatch = !isManual && p.is_arxiv && p.url.includes('/abs/') ? p.url.match(/abs\/([^/?v]+)/) : null;
   const arxivId = arxivIdMatch ? arxivIdMatch[1] : null;
+  const uploadJobId = p.upload_job_id || p.job_id || '';
+  const canManageUpload = manageMode && Boolean(uploadJobId && p.upload_translation_status);
   let pdfLink = '';
   let zhPdfBtn = '';
-  
+
   if (arxivId) {
-    pdfLink = `<a class="pdf-link" href="${p.url.replace('/abs/', '/pdf/')}.pdf" target="_blank">PDF</a>`;
+    pdfLink = `<a class="pdf-link" href="${escAttr(p.url.replace('/abs/', '/pdf/') + '.pdf')}" target="_blank">PDF</a>`;
     if (p.translation_status === 'done') {
-      zhPdfBtn = `<a href="/download_translated_pdf/${arxivId}" target="_blank" class="pdf-link" style="margin-left: 6px; background: #d97706;">中文PDF</a>`;
+      zhPdfBtn = `<a href="/download_translated_pdf/${encodeURIComponent(arxivId)}" target="_blank" class="pdf-link" style="margin-left: 6px; background: #d97706;">中文PDF</a>`;
     } else if (p.translation_status && p.translation_status !== 'error') {
-      zhPdfBtn = `<button class="zh-pdf-btn" disabled>翻译中</button>`;
+      zhPdfBtn = '<button class="zh-pdf-btn" disabled>翻译中</button>';
     } else {
       const text = p.translation_status === 'error' ? '翻译失败(重试)' : '翻译PDF';
-      zhPdfBtn = `<button class="zh-pdf-btn" data-url="${p.url}" data-id="${arxivId}">${text}</button>`;
+      zhPdfBtn = `<button class="zh-pdf-btn" data-url="${escAttr(p.url)}" data-id="${escAttr(arxivId)}">${text}</button>`;
+    }
+  } else if (isManual) {
+    const upStatus = p.upload_translation_status;
+    if (canManageUpload) {
+      pdfLink = `<button class="upload-delete-btn" data-job-id="${escAttr(uploadJobId)}">删除原PDF</button>`;
+    } else {
+      pdfLink = `<a class="pdf-link orig-pdf-link" href="${escAttr(p.url)}" target="_blank">PDF</a>`;
+      if (upStatus === 'done') {
+        zhPdfBtn = `<a href="/download_uploaded_pdf?job_id=${encodeURIComponent(uploadJobId)}" target="_blank" class="pdf-link" style="margin-left: 6px; background: #d97706;">中文PDF</a>`;
+      } else if (upStatus === 'pending' || upStatus === 'running') {
+        zhPdfBtn = `<button class="upload-zh-btn" data-job-id="${escAttr(uploadJobId)}" disabled>翻译中</button>`;
+      } else {
+        const text = upStatus === 'error' || upStatus === 'interrupted' ? '翻译失败(重试)' : '翻译PDF';
+        zhPdfBtn = `<button class="upload-zh-btn" data-job-id="${escAttr(uploadJobId)}">${text}</button>`;
+      }
     }
   } else {
     const upStatus = p.upload_translation_status;
     if (upStatus) {
-      pdfLink = `<a class="pdf-link orig-pdf-link" href="/download_original_pdf?url=${encodeURIComponent(p.url)}" target="_blank">PDF</a>`;
-      if (upStatus === 'done') {
-        zhPdfBtn = `<a href="/download_uploaded_pdf?url=${encodeURIComponent(p.url)}" target="_blank" class="pdf-link" style="margin-left: 6px; background: #d97706;">中文PDF</a>`;
-      } else if (upStatus === 'pending' || upStatus === 'running') {
-        zhPdfBtn = `<button class="upload-zh-btn" disabled>翻译中</button>`;
+      if (canManageUpload) {
+        pdfLink = `<button class="upload-delete-btn" data-job-id="${escAttr(uploadJobId)}">删除原PDF</button>`;
       } else {
-        const text = upStatus === 'error' ? '翻译失败(重试)' : '翻译PDF';
-        zhPdfBtn = `<button class="upload-zh-btn" data-url="${p.url}">${text}</button>`;
+        pdfLink = `<a class="pdf-link orig-pdf-link" href="/download_original_pdf?url=${encodeURIComponent(p.url)}" target="_blank">PDF</a>`;
+        if (upStatus === 'done') {
+          zhPdfBtn = `<a href="/download_uploaded_pdf?url=${encodeURIComponent(p.url)}" target="_blank" class="pdf-link" style="margin-left: 6px; background: #d97706;">中文PDF</a>`;
+        } else if (upStatus === 'pending' || upStatus === 'running') {
+          zhPdfBtn = '<button class="upload-zh-btn" disabled>翻译中</button>';
+        } else {
+          const text = upStatus === 'error' || upStatus === 'interrupted' ? '翻译失败(重试)' : '翻译PDF';
+          zhPdfBtn = `<button class="upload-zh-btn" data-url="${escAttr(p.url)}">${text}</button>`;
+        }
       }
     } else {
-      pdfLink = `<button class="upload-orig-btn" data-url="${p.url}">上传PDF</button>`;
+      pdfLink = `<button class="upload-orig-btn" data-url="${escAttr(p.url)}">上传PDF</button>`;
     }
   }
 
   let contentHtml = '';
-
-  if (p.summary_zh && p.abstract_en) {
+  const originalAbstract = p.abstract_original || p.abstract_en || '';
+  if (isManual) {
+    if (p.summary_zh) contentHtml += `<div class="abstract"><strong>总结：</strong>${escLatex(p.summary_zh)}</div>`;
+    if (p.abstract_zh) contentHtml += `<div class="abstract"><strong>摘要翻译：</strong>${escLatex(p.abstract_zh)}</div>`;
+    if (originalAbstract) {
+      contentHtml += `<details class="arxiv-details"><summary>原摘要（${esc(p.source_language || '原文')}）</summary><p class="en-content">${escLatex(originalAbstract)}</p></details>`;
+    } else if (p.metadata_incomplete) {
+      contentHtml += '<div class="abstract metadata-warning"><strong>提示：</strong>未识别到完整摘要。</div>';
+    }
+  } else if (p.summary_zh && originalAbstract) {
     contentHtml = `
       <div class="abstract"><strong>总结：</strong>${escLatex(p.summary_zh)}</div>
       <div class="abstract"><strong>原摘要翻译：</strong>${escLatex(p.abstract_zh)}</div>
-      <details class="arxiv-details"><summary>原摘要(英文)</summary><p class="en-content">${escLatex(p.abstract_en)}</p></details>
+      <details class="arxiv-details"><summary>原摘要(英文)</summary><p class="en-content">${escLatex(originalAbstract)}</p></details>
     `;
   } else {
-    // If no AI translation
-    let summaryText = p.abstract_zh || '';
-    if (summaryText) {
-      contentHtml += `<div class="abstract"><strong>总结：</strong>${escLatex(summaryText)}</div>`;
+    if (p.abstract_zh) {
+      contentHtml += `<div class="abstract"><strong>总结：</strong>${escLatex(p.abstract_zh)}</div>`;
       contentHtml += `<div class="abstract"><strong>原摘要翻译：</strong>${escLatex(p.abstract_zh)}</div>`;
     }
     if (p.is_arxiv && p.url.includes('/abs/')) {
-      const arxivIdMatch = p.url.match(/abs\/([^/?]+)/);
-      if (arxivIdMatch) {
-        contentHtml += `<details class="arxiv-details" data-id="${arxivIdMatch[1]}" ontoggle="fetchEnAbstract(this)"><summary>原摘要(英文)</summary><p class="en-content">点击加载原文...</p></details>`;
-      }
+      const lazyArxivId = p.url.match(/abs\/([^/?]+)/);
+      if (lazyArxivId) contentHtml += `<details class="arxiv-details" data-id="${escAttr(lazyArxivId[1])}" ontoggle="fetchEnAbstract(this)"><summary>原摘要(英文)</summary><p class="en-content">点击加载原文...</p></details>`;
     }
   }
 
+  const labelKey = p.label_key || p.url;
   div.innerHTML = `
-    <div class="card-title"><a href="${p.url}" target="_blank">${escLatex(p.title)}</a>${pdfLink}${zhPdfBtn}</div>
+    <div class="card-title"><a href="${escAttr(p.url)}" target="_blank">${escLatex(p.title)}</a>${pdfLink}${zhPdfBtn}</div>
     ${p.title_zh ? `<div class="card-title-zh">${escLatex(p.title_zh)}</div>` : ''}
-    <div class="card-meta">${esc(p.journal)}</div>
+    <div class="card-meta">${esc(p.journal || (isManual ? '手动上传' : ''))}</div>
     ${contentHtml}
     <div class="labels">${LABELS.map(l => {
     const labels = (p.label || '不相关').split(',');
     const isActive = labels.includes(l);
-    return `<button class="lbl${isActive ? ' active-' + l : ''}" data-url="${p.url}" data-label="${l}">${l}</button>`;
+    return `<button class="lbl${isActive ? ' active-' + l : ''}" data-url="${escAttr(p.url)}" data-key="${escAttr(labelKey)}" data-label="${l}">${l}</button>`;
   }).join('')}</div>`;
 
   div.querySelectorAll('.lbl').forEach(btn => btn.addEventListener('click', onLabel));
+  const deleteBtn = div.querySelector('.upload-delete-btn');
+  if (deleteBtn) deleteBtn.addEventListener('click', onCardDeleteUpload);
   if (arxivId) {
     const zhBtn = div.querySelector('.zh-pdf-btn');
     if (zhBtn) {
-      if (zhBtn.disabled && zhBtn.textContent === '翻译中') {
-        startPolling(arxivId, zhBtn);
-      } else {
-        zhBtn.addEventListener('click', () => onZhPdf(zhBtn));
-      }
+      if (zhBtn.disabled && zhBtn.textContent === '翻译中') startPolling(arxivId, zhBtn);
+      else zhBtn.addEventListener('click', () => onZhPdf(zhBtn));
+    }
+  } else if (isManual) {
+    const transBtn = div.querySelector('.upload-zh-btn');
+    if (transBtn) {
+      if (transBtn.disabled && transBtn.textContent === '翻译中') startUploadPollingCard('', transBtn, uploadJobId);
+      else transBtn.addEventListener('click', () => onUploadZhPdf(transBtn));
     }
   } else {
     const uploadBtn = div.querySelector('.upload-orig-btn');
-    if (uploadBtn) {
-      uploadBtn.addEventListener('click', () => triggerUpload(p.url, uploadBtn));
-    }
+    if (uploadBtn) uploadBtn.addEventListener('click', () => triggerUpload(p.url, uploadBtn));
     const transBtn = div.querySelector('.upload-zh-btn');
     if (transBtn) {
-      if (transBtn.disabled && transBtn.textContent === '翻译中') {
-        startUploadPollingCard(p.url, transBtn);
-      } else {
-        transBtn.addEventListener('click', () => onUploadZhPdf(transBtn));
-      }
+      if (transBtn.disabled && transBtn.textContent === '翻译中') startUploadPollingCard(p.url, transBtn);
+      else transBtn.addEventListener('click', () => onUploadZhPdf(transBtn));
     }
   }
-  // Render LaTeX math in the card
   renderMath(div);
   return div;
 }
@@ -408,7 +609,9 @@ async function onZhPdf(btn) {
 
 async function onLabel(e) {
   const btn = e.currentTarget;
-  const url = btn.dataset.url, clickedLabel = btn.dataset.label;
+  const url = btn.dataset.url;
+  const labelKey = btn.dataset.key || url;
+  const clickedLabel = btn.dataset.label;
   const card = btn.closest('.card');
   
   let currentLabels = Array.from(card.querySelectorAll('.lbl'))
@@ -438,7 +641,7 @@ async function onLabel(e) {
 
   const r = await fetch('/label', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ url, labels: currentLabels })
+    body: JSON.stringify({ url: labelKey, labels: currentLabels })
   }).then(r => r.json());
 
   if (r.ok) {
@@ -454,6 +657,10 @@ async function onLabel(e) {
 
 function esc(s) {
   return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function escAttr(s) {
+  return esc(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 /**
@@ -594,7 +801,7 @@ btnSearch.addEventListener('click', () => {
   document.querySelectorAll('.f-btn').forEach(b => b.classList.remove('active'));
 
   // Hide date controls
-  document.querySelector('.date-controls').style.display = 'none';
+  document.querySelector('.date-nav-controls').style.display = 'none';
 
   loadFilterOrSearch(true);
 });
@@ -612,13 +819,15 @@ document.querySelectorAll('.f-btn').forEach(btn => {
     const filter = targetBtn.dataset.filter;
     if (filter === 'all') {
       currentMode = 'date';
-      document.querySelector('.date-controls').style.display = 'flex';
+      document.querySelector('.date-nav-controls').style.display = 'inline-flex';
       searchInput.value = '';
       if (dates.length) loadDatePapers();
+    } else if (filter === 'manual') {
+      loadManualPapers();
     } else {
       currentMode = 'filter';
       currentLabel = filter;
-      document.querySelector('.date-controls').style.display = 'none';
+      document.querySelector('.date-nav-controls').style.display = 'none';
       searchInput.value = '';
       loadFilterOrSearch(true);
     }
@@ -675,18 +884,26 @@ cardUploadInput.addEventListener('change', async () => {
 });
 
 async function onUploadZhPdf(btn) {
-  const url = btn.dataset.url;
+  const url = btn.dataset.url || '';
+  const jobId = btn.dataset.jobId || '';
   btn.disabled = true;
   btn.textContent = '提交中...';
 
   try {
+    const payload = jobId ? { job_id: jobId } : { url };
     const res = await fetch('/translate_uploaded_pdf', {
-      method: 'POST', body: JSON.stringify({ url })
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
     });
     const data = await res.json();
     if (data.ok) {
+      if (data.status === 'done') {
+        btn.outerHTML = jobId
+          ? `<a href="/download_uploaded_pdf?job_id=${encodeURIComponent(jobId)}" target="_blank" class="pdf-link" style="margin-left: 6px; background: #d97706;">中文PDF</a>`
+          : `<a href="/download_uploaded_pdf?url=${encodeURIComponent(url)}" target="_blank" class="pdf-link" style="margin-left: 6px; background: #d97706;">中文PDF</a>`;
+        return;
+      }
       btn.textContent = '翻译中';
-      startUploadPollingCard(url, btn);
+      startUploadPollingCard(url, btn, jobId);
     } else {
       btn.textContent = '翻译失败(重试)';
       btn.disabled = false;
@@ -704,19 +921,26 @@ function triggerUpload(url, btn) {
 }
 
 
-function startUploadPollingCard(url, btn) {
+function startUploadPollingCard(url, btn, jobId = '') {
   let stopped = false;
   const cleanup = () => { clearInterval(timer); document.removeEventListener('visibilitychange', onVisible); };
   const checkStatus = async () => {
     if (stopped) return;
-    const s = await fetch(`/upload_translate_status?url=${encodeURIComponent(url)}`).then(r => r.json());
+    const query = jobId ? `job_id=${encodeURIComponent(jobId)}` : `url=${encodeURIComponent(url)}`;
+    const s = await fetch(`/upload_translate_status?${query}`).then(r => r.json());
     if (s.status === 'done') {
       stopped = true; cleanup();
       const cardTitle = btn.closest('.card-title');
-      const hasOrig = cardTitle.querySelector('.orig-pdf-link') !== null;
-      const origLink = hasOrig ? '' : `<a href="/download_original_pdf?url=${encodeURIComponent(url)}" target="_blank" class="pdf-link orig-pdf-link">PDF</a>`;
-      btn.outerHTML = `${origLink}<a href="/download_uploaded_pdf?url=${encodeURIComponent(url)}" target="_blank" class="pdf-link" style="margin-left: 6px; background: #d97706;">中文PDF</a>`;
-    } else if (s.status === 'error') {
+      const hasOrig = cardTitle && cardTitle.querySelector('.orig-pdf-link') !== null;
+      const originalHref = jobId
+        ? `/download_original_pdf?job_id=${encodeURIComponent(jobId)}`
+        : `/download_original_pdf?url=${encodeURIComponent(url)}`;
+      const translatedHref = jobId
+        ? `/download_uploaded_pdf?job_id=${encodeURIComponent(jobId)}`
+        : `/download_uploaded_pdf?url=${encodeURIComponent(url)}`;
+      const origLink = hasOrig ? '' : `<a href="${originalHref}" target="_blank" class="pdf-link orig-pdf-link">PDF</a>`;
+      btn.outerHTML = `${origLink}<a href="${translatedHref}" target="_blank" class="pdf-link" style="margin-left: 6px; background: #d97706;">中文PDF</a>`;
+    } else if (s.status === 'error' || s.status === 'interrupted') {
       stopped = true; cleanup();
       btn.textContent = '翻译失败(重试)';
       btn.disabled = false;
@@ -726,4 +950,27 @@ function startUploadPollingCard(url, btn) {
   const onVisible = () => { if (document.visibilityState === 'visible' && !stopped) checkStatus(); };
   document.addEventListener('visibilitychange', onVisible);
 }
+
+async function uploadManualPdf(file) {
+  const formData = new FormData();
+  formData.append('file', file);
+  try {
+    const response = await fetch('/api/admin/uploads', { method: 'POST', body: formData });
+    const data = await response.json();
+    if (!response.ok || !data.ok) throw new Error(data.error || '上传失败');
+    if (currentView === 'management') await loadManagement();
+    else await loadManualPapers();
+  } catch (error) {
+    window.alert(`手动上传失败：${error.message || error}`);
+  }
+}
+
+manualUploadInput.addEventListener('change', async () => {
+  const file = manualUploadInput.files[0];
+  manualUploadInput.value = '';
+  if (file) await uploadManualPdf(file);
+});
+
+btnManagement.addEventListener('click', toggleManageMode);
+btnManualPapers.addEventListener('click', loadManualPapers);
 

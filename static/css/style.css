@@ -29,6 +29,8 @@ header {
 }
 header h1 { font-size: 1.1rem; font-weight: 700; flex: 1; color: #1a202c; letter-spacing: -0.02em; min-width: 100px;}
 .date-controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;}
+.date-nav-controls { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.date-controls button.active { background: #b91c1c; color: #fff; border-color: #991b1b; }
 .date-picker { font-family: inherit; font-size: 1rem; font-weight: 600; color: #4a5568; border: 1px solid #e2e8f0; border-radius: 8px; padding: 6px 12px; background: #fff; cursor: pointer; outline: none; transition: border-color 0.2s;}
 .date-picker:focus { border-color: #3182ce; }
 .search-input { padding: 8px 12px; border: 1px solid #e2e8f0; border-radius: 8px; font-size: 0.9rem; outline: none; min-width: 200px; transition: border-color 0.2s;}
@@ -79,8 +81,9 @@ main { max-width: 1500px; margin: 30px auto; padding: 0 24px; padding-bottom: 60
 .card-title-zh { color: #2d3748; font-size: 1rem; font-weight: 600; margin-bottom: 8px; line-height: 1.5; }
 .card-meta { font-size: 0.8rem; font-weight: 500; color: #718096; margin-bottom: 12px; display: inline-block; padding: 4px 10px; background: #edf2f7; border-radius: 12px; }
 
-.pdf-link, .upload-orig-btn { font-size: 0.75rem; font-weight: 700; color: #fff !important; background: #4f46e5; border: none; padding: 4px 10px; border-radius: 20px; text-decoration: none !important; white-space: nowrap; box-shadow: 0 2px 4px rgba(79, 70, 229, 0.3); transition: all 0.2s; cursor: pointer; }
-.pdf-link:hover, .upload-orig-btn:hover:not(:disabled) { background: #4338ca; transform: scale(1.05); }
+.pdf-link, .upload-orig-btn, .upload-delete-btn { font-size: 0.75rem; font-weight: 700; color: #fff !important; background: #4f46e5; border: none; padding: 4px 10px; border-radius: 20px; text-decoration: none !important; white-space: nowrap; box-shadow: 0 2px 4px rgba(79, 70, 229, 0.3); transition: all 0.2s; cursor: pointer; }
+.pdf-link:hover, .upload-orig-btn:hover:not(:disabled), .upload-delete-btn:hover:not(:disabled) { background: #4338ca; transform: scale(1.05); }
+.upload-delete-btn { background: #b91c1c; box-shadow: 0 2px 4px rgba(185, 28, 28, 0.3); }
 .zh-pdf-btn, .upload-zh-btn { font-size: 0.75rem; font-weight: 700; color: #fff; background: #d97706; border: none; padding: 4px 10px; border-radius: 20px; margin-left: 6px; box-shadow: 0 2px 4px rgba(217,119,6,0.3); transition: all 0.2s; }
 .zh-pdf-btn:hover:not(:disabled), .upload-zh-btn:hover:not(:disabled) { background: #b45309; transform: scale(1.05); }
 .zh-pdf-status { font-size: 0.75rem; font-weight: 600; color: #d97706; margin-left: 6px; white-space: nowrap; }
@@ -180,7 +183,21 @@ main { max-width: 1500px; margin: 30px auto; padding: 0 24px; padding-bottom: 60
   background: #fed7d7 !important; color: #9b2c2c !important; border-color: #feb2b2 !important;
 }
 
-/* Dark Mode Support */
+/* Management and manual upload views */
+.manual-upload-toolbar { display: flex; align-items: center; gap: 10px; margin: 10px 0 20px; flex-wrap: wrap; }
+.manual-upload-toolbar h2 { flex: 1; font-size: 1.15rem; color: #2d3748; }
+.management-panel { background: rgba(255,255,255,0.7); border-radius: 16px; padding: 20px 24px; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }
+.management-list { display: flex; flex-direction: column; gap: 10px; }
+.management-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; border: 1px solid #e2e8f0; border-radius: 12px; padding: 14px 16px; background: rgba(255,255,255,0.8); }
+.management-main { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.management-main strong, .management-main span { overflow-wrap: anywhere; }
+.management-main small { color: #718096; line-height: 1.5; }
+.management-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.management-delete-btn { color: #b91c1c; border-color: #fecaca; }
+.management-retry-btn { color: #92400e; border-color: #fde68a; }
+.error-box { padding: 24px; color: #b91c1c; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.metadata-warning { color: #92400e; }
+
 @media (prefers-color-scheme: dark) {
   body { background: linear-gradient(135deg, #1a202c 0%, #2d3748 100%); color: #e2e8f0; }
   header { background: rgba(26, 32, 44, 0.8); border-bottom-color: rgba(255,255,255,0.1); }
@@ -208,6 +225,8 @@ main { max-width: 1500px; margin: 30px auto; padding: 0 24px; padding-bottom: 60
   .lbl.active-不相关 { background: #991b1b; color: #fee2e2; box-shadow: 0 0 0 1px #b91c1c inset; }
 
   .date-picker, .search-input, button { background: #2d3748; border-color: #4a5568; color: #e2e8f0; }
+  .management-panel, .management-row { background: rgba(45,55,72,0.85); border-color: rgba(255,255,255,0.1); }
+  .manual-upload-toolbar h2 { color: #e2e8f0; }
   button:hover:not(:disabled) { background: #4a5568; }
   .section-title::after { background: #4a5568; }
   
@@ -247,5 +266,7 @@ main { max-width: 1500px; margin: 30px auto; padding: 0 24px; padding-bottom: 60
   .search-box { width: 100%; display: flex; gap: 8px;}
   .search-input { width: 100%; flex: 1; min-width: unset; }
   .filter-bar { top: 120px; }
+  .management-row { align-items: stretch; flex-direction: column; }
+  .management-actions { justify-content: flex-start; }
 }
 

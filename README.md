@@ -11,6 +11,8 @@
 - **标签分类** — 支持对论文进行「相关 / 感兴趣 / 组会报告 / 不相关」多标签标注
 - **全景日历** — 按日期浏览论文，日历视图标记已读/未读状态
 - **全局搜索** — 支持按标题、摘要、期刊等关键词全文搜索
+- **上传管理** — 在当前论文页面进入管理模式，删除误传 PDF；保留论文卡片、摘要和标签
+- **手动上传论文** — 上传 PDF 后自动解析 LaTeX，调用翻译 API 识别题目、摘要并生成论文卡片
 - **LaTeX 公式渲染** — 标题和摘要中的数学公式自动渲染（KaTeX）
 - **暗色模式** — 自动跟随系统主题切换
 - **每日定时任务** — 每天北京时间 9:00 自动执行抓取与筛选流程
@@ -79,6 +81,10 @@ cp config.example.py config.py
 | `AI_MAX_ATTEMPTS` | 每个筛选批次的最大尝试次数 | `5` |
 | `AI_RETRY_BASE_DELAY` | 筛选重试指数退避基数（秒） | `10.0` |
 | `DOC2X_API_KEY` | doc2x API 密钥（PDF→LaTeX） | — |
+| `MAX_UPLOAD_BYTES` | 单个上传 PDF 的大小上限 | `52428800` |
+| `METADATA_MAX_SOURCE_CHARS` | 发送给元数据识别 API 的 LaTeX 字符上限 | `120000` |
+| `METADATA_MAX_ATTEMPTS` | 元数据识别 API 最大尝试次数 | `3` |
+| `METADATA_RETRY_DELAY` | 元数据识别重试初始等待秒数 | `1.0` |
 | `DAILY_FETCH_HOUR` | 每日抓取时间（北京时间） | `9` |
 | `RECENT_DAYS` | RSS 保留天数 | `3` |
 
@@ -120,9 +126,10 @@ RSS 源 ──抓取──→ 全量论文列表
 
 ### 论文翻译流程
 
-```
+```text
 arXiv 论文:  LaTeX 源码 → 翻译 → XeLaTeX 编译 → 中文 PDF
 非 arXiv:    PDF → doc2x → LaTeX → 翻译 → XeLaTeX 编译 → 中文 PDF
+手动上传:    PDF → doc2x → LaTeX → 元数据识别 → 论文卡片；全文 PDF 翻译按需执行
 ```
 
 ## ⚠️ 注意事项

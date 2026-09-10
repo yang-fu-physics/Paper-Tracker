@@ -54,6 +54,12 @@ DOC2X_BASE_URL = os.environ.get("PAPER_DOC2X_BASE_URL", "https://v2.doc2x.noedge
 # ── 翻译参数 ──────────────────────────────────────────────────────────────
 TRANSLATE_CHUNK_SIZE = int(os.environ.get("PAPER_TRANSLATE_CHUNK_SIZE", 20000))
 
+# ── 上传与元数据识别 ───────────────────────────────────────────────────────
+MAX_UPLOAD_BYTES = int(os.environ.get("PAPER_MAX_UPLOAD_BYTES", 50 * 1024 * 1024))
+METADATA_MAX_SOURCE_CHARS = int(os.environ.get("PAPER_METADATA_MAX_SOURCE_CHARS", 120000))
+METADATA_MAX_ATTEMPTS = int(os.environ.get("PAPER_METADATA_MAX_ATTEMPTS", 3))
+METADATA_RETRY_DELAY = float(os.environ.get("PAPER_METADATA_RETRY_DELAY", 1.0))
+
 # ── 每日定时任务 ──────────────────────────────────────────────────────────
 DAILY_FETCH_HOUR = int(os.environ.get("PAPER_DAILY_FETCH_HOUR", 9))  # 北京时间
 RECENT_DAYS = int(os.environ.get("PAPER_RECENT_DAYS", 3))  # RSS 保留最近 N 天

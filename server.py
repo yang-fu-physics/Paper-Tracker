@@ -7,6 +7,8 @@ import re
 import uuid
 import asyncio
 import logging
+import shutil
+from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 import hashlib
@@ -23,8 +25,16 @@ logging.basicConfig(
 
 # translation job state: arxiv_id -> {"status": "pending"|"running"|"done"|"error", "pdf": path, "error": msg}
 _translate_jobs: dict = {}
-# upload translation job state: job_id -> {"status": ..., "pdf": path, "error": msg, "filename": original name}
+# Upload state is a cache only; persisted upload_translations is authoritative.
 _upload_jobs: dict = {}
+_upload_job_locks = defaultdict(threading.RLock)
+_upload_jobs_state_lock = threading.RLock()
+_manual_jobs_semaphore = threading.BoundedSemaphore(2)
+
+MANUAL_SOURCE = "manual"
+RSS_SOURCE = "rss"
+MANUAL_LABEL_PREFIX = "manual:"
+MAX_UPLOAD_BYTES = int(getattr(config, "MAX_UPLOAD_BYTES", 50 * 1024 * 1024))
 
 BASE = Path(__file__).parent
 app = Flask(__name__, static_folder=str(BASE / "static"), static_url_path="/static")
@@ -135,11 +145,68 @@ def _daily_fetch_job():
         time.sleep(60)  # Check every minute
 
 def papers_conn():
-    return sqlite3.connect(PAPERS_DB)
+    conn = sqlite3.connect(PAPERS_DB, timeout=30)
+    conn.execute("PRAGMA busy_timeout=30000")
+    return conn
 
 
 def labels_conn():
-    return sqlite3.connect(LABELS_DB)
+    conn = sqlite3.connect(LABELS_DB, timeout=30)
+    conn.execute("PRAGMA busy_timeout=30000")
+    return conn
+
+
+def _utc_now():
+    return datetime.now(tz=timezone.utc).isoformat()
+
+
+def _sha256_file(path: Path) -> str | None:
+    if not path.is_file():
+        return None
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _legacy_original_path(job_id: str) -> Path:
+    return UPLOAD_DIR / f"{job_id}.pdf"
+
+
+def _manual_label_key(job_id: str) -> str:
+    return f"{MANUAL_LABEL_PREFIX}{job_id}"
+
+
+def _ensure_column(conn, table: str, column: str, definition: str):
+    columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in columns:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def _backfill_upload_rows(conn):
+    """Fill ownership metadata for legacy URL-keyed uploads without deleting data."""
+    url_by_job = {
+        hashlib.md5(url.encode()).hexdigest(): url
+        for (url,) in conn.execute("SELECT url FROM pushed_papers").fetchall()
+    }
+    rows = conn.execute(
+        "SELECT job_id, source_type, paper_url, original_pdf_path, pdf_sha256, metadata_status "
+        "FROM upload_translations"
+    ).fetchall()
+    for job_id, source_type, paper_url, original_pdf_path, pdf_sha256, metadata_status in rows:
+        if source_type not in (RSS_SOURCE, MANUAL_SOURCE):
+            source_type = RSS_SOURCE
+        path = Path(original_pdf_path) if original_pdf_path else _legacy_original_path(job_id)
+        digest = pdf_sha256 or _sha256_file(path)
+        paper_url = paper_url or url_by_job.get(job_id)
+        if source_type == RSS_SOURCE and metadata_status in (None, ""):
+            metadata_status = "not_applicable"
+        conn.execute(
+            "UPDATE upload_translations SET source_type=?, paper_url=?, original_pdf_path=?, "
+            "pdf_sha256=?, metadata_status=? WHERE job_id=?",
+            (source_type, paper_url, str(path), digest, metadata_status or "not_applicable", job_id),
+        )
 
 
 def init_dbs():
@@ -168,15 +235,42 @@ def init_dbs():
                 status TEXT NOT NULL,
                 pdf_path TEXT,
                 error TEXT,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                source_type TEXT NOT NULL DEFAULT 'rss',
+                paper_url TEXT,
+                original_pdf_path TEXT,
+                pdf_sha256 TEXT,
+                metadata_status TEXT NOT NULL DEFAULT 'not_applicable',
+                metadata_stage TEXT,
+                metadata_error TEXT,
+                tex_dir TEXT,
+                updated_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS manual_papers (
+                job_id TEXT PRIMARY KEY,
+                original_title TEXT NOT NULL DEFAULT '',
+                title_zh TEXT NOT NULL DEFAULT '',
+                abstract_original TEXT NOT NULL DEFAULT '',
+                abstract_zh TEXT NOT NULL DEFAULT '',
+                summary_zh TEXT NOT NULL DEFAULT '',
+                source_language TEXT NOT NULL DEFAULT '',
+                metadata_incomplete INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
             );
         """)
-        try:
-            c.execute("ALTER TABLE paper_evaluations ADD COLUMN summary_zh TEXT")
-        except sqlite3.OperationalError: pass
-        try:
-            c.execute("ALTER TABLE paper_evaluations ADD COLUMN abstract_en TEXT")
-        except sqlite3.OperationalError: pass
+        _ensure_column(c, "paper_evaluations", "summary_zh", "TEXT")
+        _ensure_column(c, "paper_evaluations", "abstract_en", "TEXT")
+        _ensure_column(c, "upload_translations", "source_type", "TEXT NOT NULL DEFAULT 'rss'")
+        _ensure_column(c, "upload_translations", "paper_url", "TEXT")
+        _ensure_column(c, "upload_translations", "original_pdf_path", "TEXT")
+        _ensure_column(c, "upload_translations", "pdf_sha256", "TEXT")
+        _ensure_column(c, "upload_translations", "metadata_status", "TEXT NOT NULL DEFAULT 'not_applicable'")
+        _ensure_column(c, "upload_translations", "metadata_stage", "TEXT")
+        _ensure_column(c, "upload_translations", "metadata_error", "TEXT")
+        _ensure_column(c, "upload_translations", "tex_dir", "TEXT")
+        _ensure_column(c, "upload_translations", "updated_at", "TEXT")
+        _backfill_upload_rows(c)
     with labels_conn() as c:
         c.executescript("""
             CREATE TABLE IF NOT EXISTS paper_labels (
@@ -189,6 +283,22 @@ def init_dbs():
                 read_at TEXT NOT NULL
             );
         """)
+
+
+def _upload_index():
+    with papers_conn() as c:
+        rows = c.execute(
+            "SELECT job_id, paper_url, status, source_type FROM upload_translations "
+            "WHERE paper_url IS NOT NULL"
+        ).fetchall()
+    return {
+        paper_url: {
+            "job_id": job_id,
+            "status": status,
+            "source_type": source_type or RSS_SOURCE,
+        }
+        for job_id, paper_url, status, source_type in rows
+    }
 
 
 @app.route("/")
@@ -226,12 +336,16 @@ def papers():
             for r in lc.execute("SELECT url, label FROM paper_labels").fetchall()
         }
         translations = {k: v["status"] for k, v in _translate_jobs.items()}
+    uploads = _upload_index()
     result = []
     for url, journal, title, pushed_at, title_zh, abstract_zh, summary_zh, abstract_en in rows:
         arxiv_match = re.search(r'abs/([^/?v]+)', url)
         arxiv_id = arxiv_match.group(1) if arxiv_match else None
+        upload = uploads.get(url)
         result.append({
             "url": url,
+            "label_key": url,
+            "source_type": RSS_SOURCE,
             "journal": journal or "",
             "title": title or "",
             "pushed_at": pushed_at,
@@ -239,10 +353,12 @@ def papers():
             "abstract_zh": abstract_zh or "",
             "summary_zh": summary_zh or "",
             "abstract_en": abstract_en or "",
+            "abstract_original": abstract_en or "",
             "label": labels.get(url, "不相关"),
             "is_arxiv": (journal or "").startswith("arXiv:"),
             "translation_status": translations.get(arxiv_id) if arxiv_id else None,
-            "upload_translation_status": _upload_jobs.get(hashlib.md5(url.encode()).hexdigest(), {}).get("status"),
+            "upload_translation_status": upload["status"] if upload else None,
+            "upload_job_id": upload["job_id"] if upload else None,
         })
     return jsonify({"date": date, "papers": result})
 
@@ -289,12 +405,16 @@ def filter_papers():
         translations = {k: v["status"] for k, v in _translate_jobs.items()}
         pc.execute("DETACH DATABASE ldb")
 
+    uploads = _upload_index()
     result = []
     for url, journal, title, pushed_at, title_zh, abstract_zh, summary_zh, abstract_en in rows:
         arxiv_match = re.search(r'abs/([^/?v]+)', url)
         arxiv_id = arxiv_match.group(1) if arxiv_match else None
+        upload = uploads.get(url)
         result.append({
             "url": url,
+            "label_key": url,
+            "source_type": RSS_SOURCE,
             "journal": journal or "",
             "title": title or "",
             "pushed_at": pushed_at,
@@ -302,10 +422,12 @@ def filter_papers():
             "abstract_zh": abstract_zh or "",
             "summary_zh": summary_zh or "",
             "abstract_en": abstract_en or "",
+            "abstract_original": abstract_en or "",
             "label": label,
             "is_arxiv": (journal or "").startswith("arXiv:"),
             "translation_status": translations.get(arxiv_id) if arxiv_id else None,
-            "upload_translation_status": _upload_jobs.get(hashlib.md5(url.encode()).hexdigest(), {}).get("status"),
+            "upload_translation_status": upload["status"] if upload else None,
+            "upload_job_id": upload["job_id"] if upload else None,
         })
     return jsonify({"label": label, "papers": result, "has_next": has_next})
 
@@ -363,12 +485,16 @@ def search_papers():
         translations = {k: v["status"] for k, v in _translate_jobs.items()}
         pc.execute("DETACH DATABASE ldb")
 
+    uploads = _upload_index()
     result = []
     for url, journal, title, pushed_at, title_zh, abstract_zh, summary_zh, abstract_en, label in rows:
         arxiv_match = re.search(r'abs/([^/?v]+)', url)
         arxiv_id = arxiv_match.group(1) if arxiv_match else None
+        upload = uploads.get(url)
         result.append({
             "url": url,
+            "label_key": url,
+            "source_type": RSS_SOURCE,
             "journal": journal or "",
             "title": title or "",
             "pushed_at": pushed_at,
@@ -376,10 +502,12 @@ def search_papers():
             "abstract_zh": abstract_zh or "",
             "summary_zh": summary_zh or "",
             "abstract_en": abstract_en or "",
+            "abstract_original": abstract_en or "",
             "label": label,
             "is_arxiv": (journal or "").startswith("arXiv:"),
             "translation_status": translations.get(arxiv_id) if arxiv_id else None,
-            "upload_translation_status": _upload_jobs.get(hashlib.md5(url.encode()).hexdigest(), {}).get("status"),
+            "upload_translation_status": upload["status"] if upload else None,
+            "upload_job_id": upload["job_id"] if upload else None,
         })
     return jsonify({"query": q_str, "papers": result, "has_next": has_next})
 
@@ -486,142 +614,768 @@ def download_translated_pdf(arxiv_id):
 UPLOAD_TRANSLATE_DIR = BASE / "data" / "upload_translations"
 
 
-def _save_upload_translation_to_db(job_id: str, filename: str, status: str, pdf_path: str = None, error: str = None):
-    now = datetime.now(tz=timezone.utc).isoformat()
+def _save_upload_translation_to_db(
+    job_id: str,
+    filename: str,
+    status: str,
+    pdf_path: str = None,
+    error: str = None,
+    *,
+    source_type: str | None = None,
+    paper_url: str | None = None,
+    original_pdf_path: str | None = None,
+    pdf_sha256: str | None = None,
+    metadata_status: str | None = None,
+    metadata_stage: str | None = None,
+    metadata_error: str | None = None,
+    tex_dir: str | None = None,
+):
+    now = _utc_now()
     with papers_conn() as c:
+        existing = c.execute(
+            "SELECT source_type, paper_url, original_pdf_path, pdf_sha256, metadata_status, "
+            "metadata_stage, metadata_error, tex_dir FROM upload_translations WHERE job_id=?",
+            (job_id,),
+        ).fetchone()
+        old = existing or (RSS_SOURCE, None, None, None, "not_applicable", None, None, None)
+        values = (
+            source_type or old[0] or RSS_SOURCE,
+            paper_url if paper_url is not None else old[1],
+            original_pdf_path if original_pdf_path is not None else old[2],
+            pdf_sha256 if pdf_sha256 is not None else old[3],
+            metadata_status if metadata_status is not None else old[4] or "not_applicable",
+            metadata_stage if metadata_stage is not None else old[5],
+            metadata_error if metadata_error is not None else old[6],
+            tex_dir if tex_dir is not None else old[7],
+        )
         c.execute(
-            "INSERT OR REPLACE INTO upload_translations (job_id, filename, status, pdf_path, error, created_at) VALUES (?,?,?,?,?,?)",
-            (job_id, filename, status, pdf_path, error, now),
+            """INSERT INTO upload_translations
+            (job_id, filename, status, pdf_path, error, created_at, source_type,
+             paper_url, original_pdf_path, pdf_sha256, metadata_status, metadata_stage,
+             metadata_error, tex_dir, updated_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(job_id) DO UPDATE SET
+              filename=excluded.filename, status=excluded.status, pdf_path=excluded.pdf_path,
+              error=excluded.error, source_type=excluded.source_type, paper_url=excluded.paper_url,
+              original_pdf_path=excluded.original_pdf_path, pdf_sha256=excluded.pdf_sha256,
+              metadata_status=excluded.metadata_status, metadata_stage=excluded.metadata_stage,
+              metadata_error=excluded.metadata_error, tex_dir=excluded.tex_dir,
+              updated_at=excluded.updated_at""",
+            (job_id, filename, status, pdf_path, error, now, *values, now),
         )
 
 
 def _load_cached_upload_translations():
-    """Restore completed upload translation jobs from DB on startup."""
+    """Restore persisted upload state and mark interrupted work as recoverable."""
     with papers_conn() as c:
-        rows = c.execute("SELECT job_id, filename, status, pdf_path, error FROM upload_translations").fetchall()
-    for job_id, filename, status, pdf_path, error in rows:
+        rows = c.execute(
+            "SELECT job_id, filename, status, pdf_path, error, source_type, paper_url, "
+            "original_pdf_path, metadata_status, metadata_stage, metadata_error, tex_dir, pdf_sha256 "
+            "FROM upload_translations"
+        ).fetchall()
+    restored = 0
+    for (
+        job_id, filename, status, pdf_path, error, source_type, paper_url,
+        original_pdf_path, metadata_status, metadata_stage, metadata_error, tex_dir, pdf_sha256,
+    ) in rows:
+        metadata_status = metadata_status or "not_applicable"
+        if metadata_status in {"pending", "parsing", "identifying"}:
+            metadata_status = "interrupted"
+            metadata_stage = "interrupted"
+            metadata_error = "服务重启时任务中断，可重试"
+            _save_upload_translation_to_db(
+                job_id, filename, status, pdf_path=pdf_path, error=error,
+                source_type=source_type, paper_url=paper_url,
+                original_pdf_path=original_pdf_path, metadata_status=metadata_status,
+                metadata_stage=metadata_stage, metadata_error=metadata_error, tex_dir=tex_dir,
+            )
+        if status in {"pending", "running"}:
+            status = "interrupted"
+            error = error or "服务重启时全文翻译任务中断，可重试"
+            _save_upload_translation_to_db(
+                job_id, filename, status, pdf_path=pdf_path, error=error,
+                source_type=source_type, paper_url=paper_url,
+                original_pdf_path=original_pdf_path, metadata_status=metadata_status,
+                metadata_stage=metadata_stage, metadata_error=metadata_error, tex_dir=tex_dir,
+            )
+        state = {
+            "status": status,
+            "filename": filename,
+            "source_type": source_type or RSS_SOURCE,
+            "paper_url": paper_url,
+            "original_pdf_path": original_pdf_path or str(_legacy_original_path(job_id)),
+            "metadata_status": metadata_status,
+            "metadata_stage": metadata_stage,
+            "metadata_error": metadata_error,
+            "tex_dir": tex_dir,
+            "pdf_sha256": pdf_sha256,
+        }
         if status == "done" and pdf_path and os.path.exists(pdf_path):
-            _upload_jobs[job_id] = {"status": "done", "pdf": pdf_path, "filename": filename}
-        elif status == "error":
-            _upload_jobs[job_id] = {"status": "error", "error": error or "unknown", "filename": filename}
-        elif status == "uploaded":
-            _upload_jobs[job_id] = {"status": "uploaded", "filename": filename}
-    logging.getLogger(__name__).info(f"Restored {len(_upload_jobs)} cached upload translation jobs from DB")
+            state["pdf"] = pdf_path
+        elif pdf_path:
+            state["pdf"] = pdf_path
+        if error:
+            state["error"] = error
+        with _upload_jobs_state_lock:
+            _upload_jobs[job_id] = state
+        restored += 1
+    logging.getLogger(__name__).info(f"Restored {restored} cached upload translation jobs from DB")
+
+
+def _set_upload_memory_state(job_id: str, **updates):
+    with _upload_jobs_state_lock:
+        state = dict(_upload_jobs.get(job_id, {}))
+        state.update(updates)
+        _upload_jobs[job_id] = state
+        return dict(state)
 
 
 def _run_upload_translate_job(job_id: str, pdf_path: str, filename: str):
     from pdf_translate import translate_uploaded_pdf
-    _upload_jobs[job_id] = {"status": "running", "filename": filename}
+    row = _upload_record(job_id)
+    if not row:
+        return
+    source_type = row[5] or RSS_SOURCE
+    paper_url = row[6]
+    original_pdf_path = row[7] or str(_legacy_original_path(job_id))
+    metadata_status = row[8] or "not_applicable"
+    with _upload_job_locks[job_id]:
+        current = _upload_record(job_id)
+        if not current or current[2] == "deleting":
+            return
+        _set_upload_memory_state(
+            job_id, status="running", filename=filename, source_type=source_type,
+            paper_url=paper_url, original_pdf_path=original_pdf_path,
+            metadata_status=metadata_status,
+        )
+        _save_upload_translation_to_db(
+            job_id, filename, "running", pdf_path=current[3], error=None,
+            source_type=source_type, paper_url=paper_url,
+            original_pdf_path=original_pdf_path, metadata_status=metadata_status,
+        )
     result = translate_uploaded_pdf(pdf_path, str(UPLOAD_TRANSLATE_DIR), job_id)
-    if result["ok"]:
-        _upload_jobs[job_id] = {"status": "done", "pdf": result["pdf"], "filename": filename}
-        _save_upload_translation_to_db(job_id, filename, "done", pdf_path=result["pdf"])
-    else:
-        _upload_jobs[job_id] = {"status": "error", "error": result["error"], "filename": filename}
-        _save_upload_translation_to_db(job_id, filename, "error", error=result["error"])
+    with _upload_job_locks[job_id]:
+        current = _upload_record(job_id)
+        if not current or current[2] == "deleting":
+            return
+        if result["ok"]:
+            _set_upload_memory_state(
+                job_id, status="done", pdf=result["pdf"], filename=filename,
+                source_type=source_type, paper_url=paper_url,
+                original_pdf_path=original_pdf_path, metadata_status=metadata_status,
+            )
+            _save_upload_translation_to_db(
+                job_id, filename, "done", pdf_path=result["pdf"], error=None,
+                source_type=source_type, paper_url=paper_url,
+                original_pdf_path=original_pdf_path, metadata_status=metadata_status,
+            )
+        else:
+            _set_upload_memory_state(
+                job_id, status="error", error=result["error"], filename=filename,
+                source_type=source_type, paper_url=paper_url,
+                original_pdf_path=original_pdf_path, metadata_status=metadata_status,
+            )
+            _save_upload_translation_to_db(
+                job_id, filename, "error", pdf_path=current[3], error=result["error"],
+                source_type=source_type, paper_url=paper_url,
+                original_pdf_path=original_pdf_path, metadata_status=metadata_status,
+            )
 
+
+def _validate_upload_file(file_storage):
+    filename = secure_filename(file_storage.filename or "")
+    if not filename or not filename.lower().endswith(".pdf"):
+        return None, "only PDF files are accepted"
+    stream = file_storage.stream
+    position = stream.tell()
+    header = stream.read(5)
+    stream.seek(position)
+    if header != b"%PDF-":
+        return None, "file is not a valid PDF"
+    return filename, None
 
 
 @app.route("/upload_paper", methods=["POST"])
 def upload_paper():
-    url = request.form.get("url")
+    url = (request.form.get("url") or "").strip()
     if not url:
         return jsonify({"ok": False, "error": "no url provided"}), 400
     if "file" not in request.files:
         return jsonify({"ok": False, "error": "no file provided"}), 400
-    f = request.files["file"]
-    if not f.filename or not f.filename.lower().endswith(".pdf"):
-        return jsonify({"ok": False, "error": "only PDF files are accepted"}), 400
-
+    file_storage = request.files["file"]
+    filename, error = _validate_upload_file(file_storage)
+    if error:
+        return jsonify({"ok": False, "error": error}), 400
     job_id = hashlib.md5(url.encode()).hexdigest()
-    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    pdf_path = str(UPLOAD_DIR / f"{job_id}.pdf")
-    f.save(pdf_path)
+    pdf_path = _legacy_original_path(job_id)
+    with _upload_job_locks[job_id]:
+        existing = _upload_record(job_id)
+        if existing:
+            return jsonify({"ok": False, "error": "existing upload must be deleted before replacement"}), 409
+        UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        tmp_path = UPLOAD_DIR / f".{job_id}.{uuid.uuid4().hex}.upload"
+        try:
+            file_storage.save(tmp_path)
+            if tmp_path.stat().st_size > MAX_UPLOAD_BYTES:
+                return jsonify({"ok": False, "error": "file is too large"}), 413
+            os.replace(tmp_path, pdf_path)
+        finally:
+            tmp_path.unlink(missing_ok=True)
+        digest = _sha256_file(pdf_path)
+        _save_upload_translation_to_db(
+            job_id, filename, "uploaded", pdf_path=None, error=None,
+            source_type=RSS_SOURCE, paper_url=url, original_pdf_path=str(pdf_path),
+            pdf_sha256=digest, metadata_status="not_applicable", metadata_stage="uploaded",
+        )
+        _set_upload_memory_state(
+            job_id, status="uploaded", filename=filename, source_type=RSS_SOURCE,
+            paper_url=url, original_pdf_path=str(pdf_path), metadata_status="not_applicable",
+            metadata_stage="uploaded",
+        )
+    return jsonify({"ok": True, "job_id": job_id, "filename": filename, "status": "uploaded"})
 
-    _upload_jobs[job_id] = {"status": "uploaded", "filename": f.filename}
-    _save_upload_translation_to_db(job_id, f.filename, "uploaded")
-    return jsonify({"ok": True, "job_id": job_id, "filename": f.filename, "status": "uploaded"})
+
+def _manual_tex_dir_from_record(job_id: str, stored_tex_dir: str | None) -> str | None:
+    if not stored_tex_dir:
+        return None
+    expected_root = (_owned_work_path(job_id) / "tex_src").resolve()
+    candidate = Path(stored_tex_dir)
+    try:
+        if candidate.resolve() != expected_root:
+            return None
+    except OSError:
+        return None
+    if not candidate.is_dir() or not any(candidate.rglob("*.tex")):
+        return None
+    return str(candidate)
+
+
+def _run_manual_metadata_job(job_id: str):
+    """Convert one manual PDF and persist a card without running full translation."""
+    import paper_metadata
+    import pdf_translate
+
+    with _manual_jobs_semaphore:
+        row = _upload_record(job_id)
+        if not row or row[5] != MANUAL_SOURCE:
+            return
+        current_stage = "parsing"
+        with _upload_job_locks[job_id]:
+            row = _upload_record(job_id)
+            if not row or row[2] == "deleting":
+                return
+            if row[8] in {"parsing", "identifying", "deleting"}:
+                return
+            _save_upload_translation_to_db(
+                job_id, row[1], row[2], pdf_path=row[3], error=row[4],
+                source_type=MANUAL_SOURCE, paper_url=None,
+                original_pdf_path=row[7], pdf_sha256=row[12],
+                metadata_status="parsing", metadata_stage="parsing",
+                metadata_error=None, tex_dir=row[11],
+            )
+            _set_upload_memory_state(
+                job_id, status=row[2], filename=row[1], source_type=MANUAL_SOURCE,
+                original_pdf_path=row[7], metadata_status="parsing", metadata_stage="parsing",
+            )
+        try:
+            pdf_path = row[7]
+            if not pdf_path or not Path(pdf_path).is_file():
+                raise paper_metadata.MetadataError("original PDF is missing")
+            pdf_sha256 = row[12] or _sha256_file(Path(pdf_path))
+            tex_dir = _manual_tex_dir_from_record(job_id, row[11])
+            if tex_dir is None:
+                current_stage = "parsing"
+                work_dir = _owned_work_path(job_id)
+                work_dir.mkdir(parents=True, exist_ok=True)
+                tex_dir = pdf_translate.pdf_to_latex_dir(
+                    pdf_path, str(work_dir), source_sha256=pdf_sha256
+                )
+            with _upload_job_locks[job_id]:
+                current = _upload_record(job_id)
+                if not current or current[2] == "deleting":
+                    return
+                current_stage = "identifying"
+                _save_upload_translation_to_db(
+                    job_id, current[1], current[2], pdf_path=current[3], error=current[4],
+                    source_type=MANUAL_SOURCE, original_pdf_path=current[7],
+                    pdf_sha256=pdf_sha256, metadata_status="identifying",
+                    metadata_stage="identifying", metadata_error=None, tex_dir=tex_dir,
+                )
+                _set_upload_memory_state(
+                    job_id, status=current[2], filename=current[1], source_type=MANUAL_SOURCE,
+                    original_pdf_path=current[7], metadata_status="identifying",
+                    metadata_stage="identifying",
+                )
+            metadata = paper_metadata.recognize_metadata(tex_dir)
+            now = _utc_now()
+            with _upload_job_locks[job_id]:
+                current = _upload_record(job_id)
+                if not current or current[2] == "deleting":
+                    return
+                with papers_conn() as c:
+                    c.execute(
+                        """INSERT INTO manual_papers
+                        (job_id, original_title, title_zh, abstract_original, abstract_zh,
+                         summary_zh, source_language, metadata_incomplete, created_at, updated_at)
+                        VALUES (?,?,?,?,?,?,?,?,?,?)
+                        ON CONFLICT(job_id) DO UPDATE SET
+                          original_title=excluded.original_title, title_zh=excluded.title_zh,
+                          abstract_original=excluded.abstract_original, abstract_zh=excluded.abstract_zh,
+                          summary_zh=excluded.summary_zh, source_language=excluded.source_language,
+                          metadata_incomplete=excluded.metadata_incomplete, updated_at=excluded.updated_at""",
+                        (
+                            job_id, metadata["original_title"], metadata["title_zh"],
+                            metadata["abstract_original"], metadata["abstract_zh"],
+                            metadata["summary_zh"], metadata["source_language"],
+                            int(metadata["metadata_incomplete"]), now, now,
+                        ),
+                    )
+                _save_upload_translation_to_db(
+                    job_id, current[1], current[2], pdf_path=current[3], error=current[4],
+                    source_type=MANUAL_SOURCE, original_pdf_path=current[7],
+                    pdf_sha256=pdf_sha256, metadata_status="done",
+                    metadata_stage="card_ready", metadata_error=None, tex_dir=tex_dir,
+                )
+                _set_upload_memory_state(
+                    job_id, status=current[2], filename=current[1], source_type=MANUAL_SOURCE,
+                    original_pdf_path=current[7], metadata_status="done",
+                    metadata_stage="card_ready",
+                )
+        except Exception as exc:
+            logging.getLogger(__name__).exception("manual metadata job failed: %s", job_id)
+            with _upload_job_locks[job_id]:
+                current = _upload_record(job_id)
+                if current and current[2] != "deleting":
+                    error = str(exc)[:2000]
+                    _save_upload_translation_to_db(
+                        job_id, current[1], current[2], pdf_path=current[3], error=current[4],
+                        source_type=MANUAL_SOURCE, original_pdf_path=current[7],
+                        pdf_sha256=current[12], metadata_status="error",
+                        metadata_stage=current_stage, metadata_error=error, tex_dir=current[11],
+                    )
+                    _set_upload_memory_state(
+                        job_id, status=current[2], filename=current[1], source_type=MANUAL_SOURCE,
+                        original_pdf_path=current[7], metadata_status="error",
+                        metadata_stage=current_stage, metadata_error=error,
+                    )
+
+
+def _start_manual_metadata_job(job_id: str) -> bool:
+    with _upload_job_locks[job_id]:
+        row = _upload_record(job_id)
+        if not row or row[5] != MANUAL_SOURCE:
+            return False
+        if row[2] in {"pending", "running"} and row[8] in {"parsing", "identifying"}:
+            return False
+        _save_upload_translation_to_db(
+            job_id, row[1], row[2], pdf_path=row[3], error=row[4],
+            source_type=MANUAL_SOURCE, original_pdf_path=row[7], pdf_sha256=row[12],
+            metadata_status="pending", metadata_stage="queued", metadata_error=None,
+            tex_dir=row[11],
+        )
+        _set_upload_memory_state(
+            job_id, status=row[2], filename=row[1], source_type=MANUAL_SOURCE,
+            original_pdf_path=row[7], metadata_status="pending", metadata_stage="queued",
+        )
+    threading.Thread(target=_run_manual_metadata_job, args=(job_id,), daemon=True).start()
+    return True
+
+
+@app.route("/api/admin/uploads", methods=["POST"])
+def admin_manual_upload():
+    if "file" not in request.files:
+        return jsonify({"ok": False, "error": "no file provided"}), 400
+    file_storage = request.files["file"]
+    filename, error = _validate_upload_file(file_storage)
+    if error:
+        return jsonify({"ok": False, "error": error}), 400
+    job_id = uuid.uuid4().hex
+    pdf_path = _legacy_original_path(job_id)
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    tmp_path = UPLOAD_DIR / f".{job_id}.{uuid.uuid4().hex}.upload"
+    try:
+        file_storage.save(tmp_path)
+        if tmp_path.stat().st_size > MAX_UPLOAD_BYTES:
+            return jsonify({"ok": False, "error": "file is too large"}), 413
+        os.replace(tmp_path, pdf_path)
+    finally:
+        tmp_path.unlink(missing_ok=True)
+    digest = _sha256_file(pdf_path)
+    _save_upload_translation_to_db(
+        job_id, filename, "uploaded", pdf_path=None, error=None,
+        source_type=MANUAL_SOURCE, paper_url=None, original_pdf_path=str(pdf_path),
+        pdf_sha256=digest, metadata_status="pending", metadata_stage="queued",
+    )
+    _set_upload_memory_state(
+        job_id, status="uploaded", filename=filename, source_type=MANUAL_SOURCE,
+        original_pdf_path=str(pdf_path), metadata_status="pending", metadata_stage="queued",
+    )
+    if not _start_manual_metadata_job(job_id):
+        return jsonify({"ok": False, "error": "could not start metadata job", "job_id": job_id}), 500
+    return jsonify({"ok": True, "job_id": job_id, "filename": filename, "status": "pending"}), 202
+
+
+@app.route("/api/admin/uploads/<job_id>/process", methods=["POST"])
+def retry_manual_metadata(job_id):
+    if not _valid_upload_job_id(job_id):
+        return jsonify({"ok": False, "error": "invalid job id"}), 400
+    row = _upload_record(job_id)
+    if not row:
+        return jsonify({"ok": False, "error": "upload not found"}), 404
+    if row[5] != MANUAL_SOURCE:
+        return jsonify({"ok": False, "error": "only manual uploads have metadata processing"}), 400
+    if row[8] in {"parsing", "identifying", "pending"}:
+        return jsonify({"ok": True, "status": row[8]}), 200
+    if not _start_manual_metadata_job(job_id):
+        return jsonify({"ok": False, "error": "could not start metadata job"}), 409
+    return jsonify({"ok": True, "status": "pending"}), 202
+
+
+@app.route("/api/manual-papers")
+def manual_papers_list():
+    with papers_conn() as c:
+        rows = c.execute(
+            """SELECT m.job_id, m.original_title, m.title_zh, m.abstract_original,
+                      m.abstract_zh, m.summary_zh, m.source_language, m.metadata_incomplete,
+                      m.created_at, u.filename, u.status, u.pdf_path
+               FROM manual_papers m JOIN upload_translations u ON u.job_id=m.job_id
+               ORDER BY m.created_at DESC"""
+        ).fetchall()
+    with labels_conn() as c:
+        labels = dict(c.execute(
+            "SELECT url,label FROM paper_labels WHERE url LIKE ?", (MANUAL_LABEL_PREFIX + "%",)
+        ).fetchall())
+    papers = []
+    for (
+        job_id, original_title, title_zh, abstract_original, abstract_zh, summary_zh,
+        source_language, metadata_incomplete, created_at, filename, full_status, pdf_path,
+    ) in rows:
+        url = f"/download_original_pdf?job_id={job_id}"
+        papers.append({
+            "job_id": job_id,
+            "url": url,
+            "label_key": _manual_label_key(job_id),
+            "label": labels.get(_manual_label_key(job_id), "不相关"),
+            "source_type": MANUAL_SOURCE,
+            "title": original_title,
+            "title_zh": title_zh,
+            "abstract_original": abstract_original,
+            "abstract_en": abstract_original,
+            "abstract_zh": abstract_zh,
+            "summary_zh": summary_zh,
+            "source_language": source_language,
+            "metadata_incomplete": bool(metadata_incomplete),
+            "journal": "手动上传",
+            "pushed_at": created_at,
+            "is_arxiv": False,
+            "upload_job_id": job_id,
+            "upload_translation_status": full_status if pdf_path else None,
+        })
+    return jsonify({"papers": papers})
 
 
 @app.route("/translate_uploaded_pdf", methods=["POST"])
 def translate_uploaded_pdf_route():
-    data = request.get_json(force=True)
+    data = request.get_json(silent=True) or {}
+    requested_job_id = (data.get("job_id") or "").strip()
     url = (data.get("url") or "").strip()
-    if not url:
-        return jsonify({"ok": False, "error": "invalid url"}), 400
-    
-    job_id = hashlib.md5(url.encode()).hexdigest()
-    job = _upload_jobs.get(job_id)
-    if not job or job["status"] not in ("uploaded", "error"):
-        return jsonify({"ok": False, "error": "file not uploaded or already translating"}), 400
-
-    UPLOAD_TRANSLATE_DIR.mkdir(parents=True, exist_ok=True)
-    pdf_path = str(UPLOAD_DIR / f"{job_id}.pdf")
-    _upload_jobs[job_id]["status"] = "pending"
-    _save_upload_translation_to_db(job_id, job["filename"], "pending")
-    
-    t = threading.Thread(target=_run_upload_translate_job, args=(job_id, pdf_path, job["filename"]), daemon=True)
-    t.start()
-    return jsonify({"ok": True, "status": "pending"})
+    if requested_job_id:
+        if not _valid_upload_job_id(requested_job_id):
+            return jsonify({"ok": False, "error": "invalid job id"}), 400
+        job_id = requested_job_id
+        row = _upload_record(job_id)
+        if not row:
+            return jsonify({"ok": False, "error": "file not uploaded"}), 404
+    elif url:
+        job_id = hashlib.md5(url.encode()).hexdigest()
+        row = _upload_record(job_id)
+        if not row:
+            return jsonify({"ok": False, "error": "file not uploaded"}), 400
+    else:
+        return jsonify({"ok": False, "error": "invalid upload reference"}), 400
+    with _upload_job_locks[job_id]:
+        row = _upload_record(job_id)
+        if not row:
+            return jsonify({"ok": False, "error": "file not uploaded"}), 404
+        full_status = row[2]
+        if full_status in {"pending", "running"}:
+            return jsonify({"ok": True, "status": full_status, "job_id": job_id})
+        if full_status == "done" and row[3] and Path(row[3]).is_file():
+            return jsonify({"ok": True, "status": "done", "job_id": job_id})
+        if full_status not in {"uploaded", "error", "interrupted", "done"}:
+            return jsonify({"ok": False, "error": "file not ready for translation"}), 409
+        if not row[7] or not Path(row[7]).is_file():
+            return jsonify({"ok": False, "error": "original PDF is missing"}), 404
+        _save_upload_translation_to_db(
+            job_id, row[1], "pending", pdf_path=row[3], error=None,
+            source_type=row[5], paper_url=row[6], original_pdf_path=row[7],
+            pdf_sha256=row[12], metadata_status=row[8], metadata_stage=row[9],
+            metadata_error=row[10], tex_dir=row[11],
+        )
+        _set_upload_memory_state(
+            job_id, status="pending", filename=row[1], source_type=row[5],
+            paper_url=row[6], original_pdf_path=row[7], metadata_status=row[8],
+            metadata_stage=row[9],
+        )
+        threading.Thread(
+            target=_run_upload_translate_job,
+            args=(job_id, row[7], row[1]), daemon=True,
+        ).start()
+    return jsonify({"ok": True, "status": "pending", "job_id": job_id})
 
 
 @app.route("/upload_translate_status")
 def upload_translate_status():
-    url = request.args.get("url")
-    if not url:
+    requested_job_id = (request.args.get("job_id") or "").strip()
+    url = (request.args.get("url") or "").strip()
+    if requested_job_id:
+        if not _valid_upload_job_id(requested_job_id):
+            return jsonify({"status": "not_found"})
+        job_id = requested_job_id
+    elif url:
+        job_id = hashlib.md5(url.encode()).hexdigest()
+    else:
         return jsonify({"status": "not_found"})
-    job_id = hashlib.md5(url.encode()).hexdigest()
-    job = _upload_jobs.get(job_id)
-    if not job:
+    row = _upload_record(job_id)
+    if not row:
         return jsonify({"status": "not_found"})
-    if job["status"] == "done":
-        return jsonify({"status": "done", "job_id": job_id, "filename": job.get("filename", "")})
-    if job["status"] == "error":
-        return jsonify({"status": "error", "error": job.get("error", ""), "filename": job.get("filename", "")})
-    return jsonify({"status": job["status"], "filename": job.get("filename", "")})
+    return jsonify({
+        "status": row[2], "job_id": job_id, "filename": row[1],
+        "error": row[4] or "", "source_type": row[5] or RSS_SOURCE,
+    })
+
+
+def _translated_pdf_path(row) -> Path | None:
+    job_id, _filename, _status, pdf_path = row[0], row[1], row[2], row[3]
+    if not pdf_path:
+        return None
+    candidate = Path(pdf_path)
+    try:
+        candidate.resolve().relative_to(_owned_work_path(job_id).resolve())
+    except (OSError, ValueError):
+        return None
+    return candidate if candidate.is_file() else None
 
 
 @app.route("/download_uploaded_pdf")
 def download_uploaded_pdf():
-    url = request.args.get("url")
-    if not url:
+    requested_job_id = (request.args.get("job_id") or "").strip()
+    url = (request.args.get("url") or "").strip()
+    if requested_job_id:
+        if not _valid_upload_job_id(requested_job_id):
+            return jsonify({"error": "not ready"}), 404
+        job_id = requested_job_id
+    elif url:
+        job_id = hashlib.md5(url.encode()).hexdigest()
+    else:
         return jsonify({"error": "not ready"}), 404
-    job_id = hashlib.md5(url.encode()).hexdigest()
-    job = _upload_jobs.get(job_id)
-    if not job or job["status"] != "done":
+    row = _upload_record(job_id)
+    pdf_path = _translated_pdf_path(row) if row else None
+    if not row or row[2] != "done" or pdf_path is None:
         return jsonify({"error": "not ready"}), 404
-    original = job.get("filename", "paper")
-    base = os.path.splitext(original)[0]
-    return send_file(job["pdf"], as_attachment=False,
+    base = os.path.splitext(row[1] or "paper")[0]
+    return send_file(pdf_path, as_attachment=False,
                      download_name=f"{base}_zh.pdf", mimetype="application/pdf")
 
 
 @app.route("/download_original_pdf")
 def download_original_pdf():
-    url = request.args.get("url")
-    if not url:
+    requested_job_id = (request.args.get("job_id") or "").strip()
+    url = (request.args.get("url") or "").strip()
+    if requested_job_id:
+        if not _valid_upload_job_id(requested_job_id):
+            return jsonify({"error": "not found"}), 404
+        job_id = requested_job_id
+    elif url:
+        job_id = hashlib.md5(url.encode()).hexdigest()
+    else:
         return jsonify({"error": "not found"}), 404
-    job_id = hashlib.md5(url.encode()).hexdigest()
-    pdf_path = str(UPLOAD_DIR / f"{job_id}.pdf")
-    if not os.path.exists(pdf_path):
+    row = _upload_record(job_id)
+    if not row:
         return jsonify({"error": "file not found"}), 404
-    
-    job = _upload_jobs.get(job_id)
-    original_name = job.get("filename", f"{job_id}.pdf") if job else f"{job_id}.pdf"
+    try:
+        pdf_path = _owned_original_path(job_id, row[7])
+    except ValueError:
+        return jsonify({"error": "file not found"}), 404
+    if not pdf_path.is_file():
+        return jsonify({"error": "file not found"}), 404
     return send_file(pdf_path, as_attachment=False,
-                     download_name=original_name, mimetype="application/pdf")
+                     download_name=row[1] or f"{job_id}.pdf", mimetype="application/pdf")
+
+
+def _valid_upload_job_id(job_id: str) -> bool:
+    return bool(re.fullmatch(r"[0-9a-f]{32}", job_id or ""))
+
+
+def _upload_record(job_id: str):
+    with papers_conn() as c:
+        return c.execute(
+            "SELECT job_id, filename, status, pdf_path, error, source_type, paper_url, "
+            "original_pdf_path, metadata_status, metadata_stage, metadata_error, tex_dir, pdf_sha256 "
+            "FROM upload_translations WHERE job_id=?",
+            (job_id,),
+        ).fetchone()
+
+
+def _owned_original_path(job_id: str, stored_path: str | None) -> Path:
+    root = UPLOAD_DIR.resolve()
+    path = Path(stored_path) if stored_path else _legacy_original_path(job_id)
+    if path.parent.resolve() != root or path.name != f"{job_id}.pdf":
+        raise ValueError("upload record points outside the owned upload directory")
+    return path
+
+
+def _owned_work_path(job_id: str) -> Path:
+    root = UPLOAD_TRANSLATE_DIR.resolve()
+    path = UPLOAD_TRANSLATE_DIR / job_id
+    if path.parent.resolve() != root or path.name != job_id:
+        raise ValueError("upload record points outside the owned translation directory")
+    return path
+
+
+def _remove_owned_path(path: Path):
+    if path.is_symlink() or path.is_file():
+        path.unlink(missing_ok=True)
+    elif path.is_dir():
+        shutil.rmtree(path)
+
+
+def _delete_upload_record(job_id: str):
+    """Delete one upload and only its owned artifacts; return a result dict."""
+    if not _valid_upload_job_id(job_id):
+        return {"ok": False, "status": 400, "error": "invalid job id"}
+    lock = _upload_job_locks[job_id]
+    with lock:
+        row = _upload_record(job_id)
+        if not row:
+            with _upload_jobs_state_lock:
+                _upload_jobs.pop(job_id, None)
+            return {"ok": True, "already_deleted": True}
+        (
+            _row_id, filename, full_status, pdf_path, full_error, source_type, paper_url,
+            original_pdf_path, metadata_status, metadata_stage, metadata_error, _tex_dir, _pdf_sha256,
+        ) = row
+        active = full_status in {"pending", "running"} or metadata_status in {
+            "pending", "parsing", "identifying", "deleting"
+        }
+        if active:
+            return {"ok": False, "status": 409, "error": "upload is still processing"}
+        previous = (full_status, full_error, metadata_status, metadata_stage, metadata_error)
+        with papers_conn() as c:
+            c.execute(
+                "UPDATE upload_translations SET status='deleting', metadata_status=?, "
+                "metadata_stage='deleting', metadata_error=NULL, updated_at=? WHERE job_id=?",
+                ("deleting", _utc_now(), job_id),
+            )
+        try:
+            _remove_owned_path(_owned_original_path(job_id, original_pdf_path))
+            _remove_owned_path(_owned_work_path(job_id))
+        except (OSError, ValueError) as exc:
+            with papers_conn() as c:
+                c.execute(
+                    "UPDATE upload_translations SET status=?, error=?, metadata_status=?, "
+                    "metadata_stage=?, metadata_error=?, updated_at=? WHERE job_id=?",
+                    (*previous, _utc_now(), job_id),
+                )
+            return {"ok": False, "status": 500, "error": f"cleanup failed: {exc}"}
+        try:
+            if source_type == MANUAL_SOURCE:
+                with labels_conn() as c:
+                    c.execute("DELETE FROM paper_labels WHERE url=?", (_manual_label_key(job_id),))
+                with papers_conn() as c:
+                    c.execute("DELETE FROM manual_papers WHERE job_id=?", (job_id,))
+            with papers_conn() as c:
+                c.execute("DELETE FROM upload_translations WHERE job_id=?", (job_id,))
+        except sqlite3.Error as exc:
+            with papers_conn() as c:
+                c.execute(
+                    "UPDATE upload_translations SET status=?, error=?, metadata_status=?, "
+                    "metadata_stage=?, metadata_error=?, updated_at=? WHERE job_id=?",
+                    (*previous, _utc_now(), job_id),
+                )
+            return {"ok": False, "status": 500, "error": f"database cleanup failed: {exc}"}
+        with _upload_jobs_state_lock:
+            _upload_jobs.pop(job_id, None)
+        return {"ok": True, "job_id": job_id, "source_type": source_type or RSS_SOURCE}
+
+
+@app.route("/api/admin/uploads/<job_id>", methods=["DELETE"])
+def admin_delete_upload(job_id):
+    result = _delete_upload_record(job_id)
+    status = result.pop("status", 200)
+    return jsonify(result), status
+
+
+@app.route("/api/admin/uploads")
+def admin_uploads_list():
+    """Return persisted upload records for the authenticated management view."""
+    with papers_conn() as c:
+        rows = c.execute(
+            """SELECT u.job_id, u.filename, u.status, u.error, u.created_at,
+                      u.source_type, u.paper_url, u.original_pdf_path, u.pdf_path,
+                      u.metadata_status, u.metadata_stage, u.metadata_error, u.updated_at,
+                      m.original_title, m.title_zh, m.abstract_original, m.abstract_zh,
+                      m.summary_zh, m.source_language, m.metadata_incomplete,
+                      p.title, e.title_zh
+               FROM upload_translations u
+               LEFT JOIN manual_papers m ON m.job_id = u.job_id
+               LEFT JOIN pushed_papers p ON p.url = u.paper_url
+               LEFT JOIN paper_evaluations e ON e.url = u.paper_url
+               ORDER BY u.created_at DESC, u.job_id DESC"""
+        ).fetchall()
+    uploads = []
+    for row in rows:
+        (
+            job_id, filename, status, error, created_at, source_type, paper_url,
+            original_pdf_path, translated_pdf_path, metadata_status, metadata_stage,
+            metadata_error, updated_at, original_title, title_zh, abstract_original,
+            abstract_zh, summary_zh, source_language, metadata_incomplete, rss_title,
+            rss_title_zh,
+        ) = row
+        original_exists = bool(original_pdf_path and Path(original_pdf_path).is_file())
+        translated_exists = bool(translated_pdf_path and Path(translated_pdf_path).is_file())
+        uploads.append({
+            "job_id": job_id,
+            "filename": filename,
+            "source_type": source_type or RSS_SOURCE,
+            "paper_url": paper_url or "",
+            "title": (original_title or rss_title or filename or "未命名论文"),
+            "title_zh": title_zh or rss_title_zh or "",
+            "status": status,
+            "error": error or "",
+            "created_at": created_at,
+            "updated_at": updated_at or created_at,
+            "metadata_status": metadata_status or "not_applicable",
+            "metadata_stage": metadata_stage or "",
+            "metadata_error": metadata_error or "",
+            "metadata_incomplete": bool(metadata_incomplete),
+            "source_language": source_language or "",
+            "original_exists": original_exists,
+            "translated_exists": translated_exists,
+            "can_retry_metadata": (source_type == MANUAL_SOURCE and metadata_status in {
+                "error", "interrupted", "uploaded"
+            }),
+            "can_delete": status not in {"pending", "running"} and metadata_status not in {
+                "pending", "parsing", "identifying", "deleting"
+            },
+        })
+    return jsonify({"uploads": uploads})
 
 
 @app.route("/upload_jobs")
 def upload_jobs_list():
-    """Return all upload translation jobs for the UI."""
+    """Return all upload translation jobs for the legacy UI."""
     jobs = []
-    for jid, job in _upload_jobs.items():
+    with papers_conn() as c:
+        rows = c.execute(
+            "SELECT job_id, filename, status, error FROM upload_translations ORDER BY created_at DESC"
+        ).fetchall()
+    for jid, filename, status, error in rows:
         jobs.append({
             "job_id": jid,
-            "filename": job.get("filename", ""),
-            "status": job["status"],
-            "error": job.get("error", ""),
+            "filename": filename,
+            "status": status,
+            "error": error or "",
         })
     return jsonify({"jobs": jobs})
 

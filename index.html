@@ -19,9 +19,13 @@
   </div>
 
   <div class="date-controls" style="margin-left:auto;">
-    <button id="btn-prev">← 前一天</button>
-    <button id="btn-open-cal" class="date-picker" style="font-size:0.9rem;">🗓️ <span id="current-date-text">全景日历</span></button>
-    <button id="btn-next">后一天 →</button>
+    <span class="date-nav-controls">
+      <button id="btn-prev">← 前一天</button>
+      <button id="btn-open-cal" class="date-picker" style="font-size:0.9rem;">🗓️ <span id="current-date-text">全景日历</span></button>
+      <button id="btn-next">后一天 →</button>
+    </span>
+    <button id="btn-manual-papers">手动上传</button>
+    <button id="btn-management">管理</button>
   </div>
 </header>
 <div class="filter-bar" id="filter-bar">
@@ -32,6 +36,7 @@
   <button class="f-btn" data-filter="可做">可做</button>
   <button class="f-btn" data-filter="组会报告">组会报告</button>
   <button class="f-btn" data-filter="不相关">不相关</button>
+  <button class="f-btn" data-filter="manual">手动上传</button>
 </div>
 <main id="main">
   <div class="grid-container">
@@ -46,6 +51,7 @@
 
 <!-- Hidden input for card-specific uploads -->
 <input type="file" id="card-upload-input" accept=".pdf" style="display:none;">
+<input type="file" id="manual-upload-input" accept=".pdf" style="display:none;">
 
 <!-- Fullscreen Calendar Modal -->
 <div id="calendar-modal" class="modal">

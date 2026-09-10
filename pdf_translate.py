@@ -2,11 +2,46 @@
 arXiv source (LaTeX) -> translate (via Gemini) -> recompile PDF
 Fallback: PDF -> LaTeX (via doc2x) -> translate -> recompile
 """
-import os, re, time, tarfile, subprocess, shutil, tempfile, glob, requests, logging, zipfile
+import os, re, time, tarfile, subprocess, shutil, tempfile, glob, requests, logging, zipfile, hashlib
+from pathlib import Path
+from stat import S_ISLNK
 
 import config
 
 logger = logging.getLogger("pdf_translate")
+
+
+def _file_sha256(pdf_path: str) -> str:
+    digest = hashlib.sha256()
+    with open(pdf_path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _safe_extract_zip(zip_path: str, target_dir: str):
+    target = Path(target_dir).resolve()
+    target.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(zip_path, "r") as archive:
+        for info in archive.infolist():
+            name = info.filename.replace("\\", "/")
+            parts = Path(name).parts
+            if not name or name.startswith("/") or ".." in parts:
+                raise RuntimeError("doc2x archive contains an unsafe path")
+            mode = info.external_attr >> 16
+            if S_ISLNK(mode):
+                raise RuntimeError("doc2x archive contains a symbolic link")
+            destination = (target / name).resolve()
+            try:
+                destination.relative_to(target)
+            except ValueError as exc:
+                raise RuntimeError("doc2x archive escapes the workspace") from exc
+            if info.is_dir():
+                destination.mkdir(parents=True, exist_ok=True)
+                continue
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with archive.open(info, "r") as source, destination.open("wb") as output:
+                shutil.copyfileobj(source, output)
 
 
 # ── doc2x ──────────────────────────────────────────────────────────────────
@@ -15,12 +50,23 @@ def _doc2x_headers():
     return {"Authorization": f"Bearer {config.DOC2X_API_KEY}"}
 
 
-def pdf_to_latex_dir(pdf_path: str, work_dir: str) -> str:
-    """Convert PDF to LaTeX via doc2x, return folder containing .tex files."""
+def pdf_to_latex_dir(pdf_path: str, work_dir: str, source_sha256: str | None = None) -> str:
+    """Convert PDF to LaTeX, reusing a cache only for the same source PDF."""
     tex_dir = os.path.join(work_dir, "tex_src")
+    marker_path = os.path.join(work_dir, ".source_sha256")
     if os.path.isdir(tex_dir) and glob.glob(os.path.join(tex_dir, "**/*.tex"), recursive=True):
-        logger.info(f"[doc2x] using cached tex_src at {tex_dir}")
-        return tex_dir
+        if source_sha256 is None:
+            logger.info(f"[doc2x] using cached tex_src at {tex_dir}")
+            return tex_dir
+        try:
+            cached_sha256 = Path(marker_path).read_text(encoding="ascii").strip()
+        except (OSError, UnicodeError):
+            cached_sha256 = ""
+        if cached_sha256 == source_sha256:
+            logger.info(f"[doc2x] using source-matched tex_src at {tex_dir}")
+            return tex_dir
+        logger.info("[doc2x] source changed; invalidating stale tex_src")
+        shutil.rmtree(tex_dir, ignore_errors=True)
     logger.info("[doc2x] pre-upload request")
     r = requests.post(f"{config.DOC2X_BASE_URL}/parse/preupload", headers=_doc2x_headers(), timeout=15)
     r.raise_for_status()
@@ -69,8 +115,10 @@ def pdf_to_latex_dir(pdf_path: str, work_dir: str) -> str:
     with open(zip_path, "wb") as f:
         f.write(res.content)
 
-    with zipfile.ZipFile(zip_path, "r") as z:
-        z.extractall(tex_dir)
+    _safe_extract_zip(zip_path, tex_dir)
+    if source_sha256:
+        with open(marker_path, "w", encoding="ascii") as marker:
+            marker.write(source_sha256)
     logger.info(f"[doc2x] extracted to {tex_dir}")
     return tex_dir
 
@@ -384,7 +432,9 @@ def translate_uploaded_pdf(pdf_path: str, output_dir: str, job_id: str) -> dict:
     try:
         # Step 1: doc2x conversion (PDF -> LaTeX)
         logger.info("[upload-pipeline] starting doc2x conversion")
-        tex_dir = pdf_to_latex_dir(pdf_path, work_dir)
+        tex_dir = pdf_to_latex_dir(
+            pdf_path, work_dir, source_sha256=_file_sha256(pdf_path)
+        )
 
         # Step 2-3: Translate & compile
         return _translate_and_compile(work_dir, tex_dir)
