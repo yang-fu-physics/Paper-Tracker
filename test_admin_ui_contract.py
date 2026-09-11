@@ -35,7 +35,8 @@ class AdminUiContractTests(unittest.TestCase):
         self.assertIn("manual-upload-progress", js)
         self.assertIn('id="manual-return-btn"', js)
         self.assertIn("manualUploads = (data.uploads || []).filter", js)
-        self.assertIn("_renderManagementRows(manualUploads)", js)
+        self.assertIn("_renderManualUploadRows(manualUploads)", js)
+        self.assertIn("manual-upload-actions", js)
         manual_view = js.split("async function loadManualPapers", 1)[1].split("function returnToRss", 1)[0]
         self.assertNotIn("makeCard(", manual_view)
 
@@ -53,8 +54,8 @@ class AdminUiContractTests(unittest.TestCase):
         self.assertIn(".manual-upload-toolbar", css)
         self.assertIn(".manual-upload-progress", css)
         self.assertIn(".manual-upload-item", css)
-        self.assertIn("grid-template-columns: minmax(0, 2fr)", css)
-        self.assertIn(".management-main small { white-space: nowrap;", css)
+        self.assertIn(".manual-upload-records", css)
+        self.assertIn(".manual-upload-actions", css)
 
 
 if __name__ == "__main__":

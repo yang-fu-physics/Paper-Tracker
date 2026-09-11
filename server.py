@@ -640,6 +640,8 @@ def download_translated_pdf(arxiv_id):
 
 UPLOAD_TRANSLATE_DIR = BASE / "data" / "upload_translations"
 
+_UPLOAD_METADATA_ERROR_UNSET = object()
+
 
 def _save_upload_translation_to_db(
     job_id: str,
@@ -654,7 +656,7 @@ def _save_upload_translation_to_db(
     pdf_sha256: str | None = None,
     metadata_status: str | None = None,
     metadata_stage: str | None = None,
-    metadata_error: str | None = None,
+    metadata_error: str | None | object = _UPLOAD_METADATA_ERROR_UNSET,
     tex_dir: str | None = None,
 ):
     now = _utc_now()
@@ -672,7 +674,7 @@ def _save_upload_translation_to_db(
             pdf_sha256 if pdf_sha256 is not None else old[3],
             metadata_status if metadata_status is not None else old[4] or "not_applicable",
             metadata_stage if metadata_stage is not None else old[5],
-            metadata_error if metadata_error is not None else old[6],
+            metadata_error if metadata_error is not _UPLOAD_METADATA_ERROR_UNSET else old[6],
             tex_dir if tex_dir is not None else old[7],
         )
         c.execute(
@@ -894,7 +896,7 @@ def _run_manual_metadata_job(job_id: str):
             if row[8] in {"parsing", "identifying", "deleting"}:
                 return
             _save_upload_translation_to_db(
-                job_id, row[1], row[2], pdf_path=row[3], error=row[4],
+                job_id, row[1], row[2], pdf_path=row[3], error=None,
                 source_type=MANUAL_SOURCE, paper_url=None,
                 original_pdf_path=row[7], pdf_sha256=row[12],
                 metadata_status="parsing", metadata_stage="parsing",
@@ -902,7 +904,7 @@ def _run_manual_metadata_job(job_id: str):
             )
             _set_upload_memory_state(
                 job_id, status=row[2], filename=row[1], source_type=MANUAL_SOURCE,
-                original_pdf_path=row[7], metadata_status="parsing", metadata_stage="parsing",
+                original_pdf_path=row[7], error=None, metadata_status="parsing", metadata_stage="parsing",
             )
         try:
             pdf_path = row[7]
@@ -923,14 +925,14 @@ def _run_manual_metadata_job(job_id: str):
                     return
                 current_stage = "identifying"
                 _save_upload_translation_to_db(
-                    job_id, current[1], current[2], pdf_path=current[3], error=current[4],
+                    job_id, current[1], current[2], pdf_path=current[3], error=None,
                     source_type=MANUAL_SOURCE, original_pdf_path=current[7],
                     pdf_sha256=pdf_sha256, metadata_status="identifying",
                     metadata_stage="identifying", metadata_error=None, tex_dir=tex_dir,
                 )
                 _set_upload_memory_state(
                     job_id, status=current[2], filename=current[1], source_type=MANUAL_SOURCE,
-                    original_pdf_path=current[7], metadata_status="identifying",
+                    original_pdf_path=current[7], error=None, metadata_status="identifying",
                     metadata_stage="identifying",
                 )
             metadata = paper_metadata.recognize_metadata(tex_dir)
@@ -958,14 +960,14 @@ def _run_manual_metadata_job(job_id: str):
                         ),
                     )
                 _save_upload_translation_to_db(
-                    job_id, current[1], current[2], pdf_path=current[3], error=current[4],
+                    job_id, current[1], current[2], pdf_path=current[3], error=None,
                     source_type=MANUAL_SOURCE, original_pdf_path=current[7],
                     pdf_sha256=pdf_sha256, metadata_status="done",
                     metadata_stage="card_ready", metadata_error=None, tex_dir=tex_dir,
                 )
                 _set_upload_memory_state(
                     job_id, status=current[2], filename=current[1], source_type=MANUAL_SOURCE,
-                    original_pdf_path=current[7], metadata_status="done",
+                    original_pdf_path=current[7], error=None, metadata_status="done",
                     metadata_stage="card_ready",
                 )
         except Exception as exc:

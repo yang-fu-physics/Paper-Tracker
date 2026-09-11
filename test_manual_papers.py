@@ -110,6 +110,11 @@ class ManualPaperTests(unittest.TestCase):
     def test_manual_metadata_worker_persists_card_and_reuses_cached_latex(self):
         response, _ = self.upload()
         job_id = response.get_json()["job_id"]
+        with sqlite3.connect(self.papers_db) as db:
+            db.execute(
+                "UPDATE upload_translations SET error=?, metadata_status=?, metadata_error=? WHERE job_id=?",
+                ("stale metadata error", "error", "stale metadata error", job_id),
+            )
         work_dir = self.translation_dir / job_id
         tex_dir = work_dir / "tex_src"
         tex_dir.mkdir(parents=True)
@@ -134,7 +139,7 @@ class ManualPaperTests(unittest.TestCase):
         self.assertEqual(recognize.call_count, 2)
         with sqlite3.connect(self.papers_db) as db:
             row = db.execute(
-                "SELECT metadata_status, tex_dir FROM upload_translations WHERE job_id=?", (job_id,)
+                "SELECT metadata_status, tex_dir, error, metadata_error FROM upload_translations WHERE job_id=?", (job_id,)
             ).fetchone()
             card = db.execute(
                 "SELECT original_title, title_zh, abstract_original, summary_zh FROM manual_papers WHERE job_id=?",
@@ -142,6 +147,8 @@ class ManualPaperTests(unittest.TestCase):
             ).fetchone()
         self.assertEqual(row[0], "done")
         self.assertEqual(row[1], str(tex_dir))
+        self.assertIsNone(row[2])
+        self.assertIsNone(row[3])
         self.assertEqual(card, ("Fictional title", "虚构标题", "Fictional abstract", "虚构总结"))
         self.assertTrue(original.exists())
 

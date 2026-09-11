@@ -416,6 +416,43 @@ function _renderManagementRows(uploads) {
   }).join('')}</div>`;
 }
 
+function _manualRecordStatusClass(item) {
+  if (item.metadata_status === 'error' || item.metadata_status === 'interrupted' || item.status === 'error') {
+    return 'error';
+  }
+  if (item.metadata_status === 'done') return 'done';
+  return 'processing';
+}
+
+function _manualRecordStatusText(item) {
+  const metadata = `元数据：${item.metadata_status || '未开始'}${item.metadata_stage ? `（${item.metadata_stage}）` : ''}`;
+  const full = `全文翻译：${item.status || '未开始'}`;
+  const error = item.metadata_error || item.error;
+  return `${metadata}；${full}${error ? `；错误：${error}` : ''}`;
+}
+
+function _renderManualUploadRows(uploads) {
+  if (!uploads.length) return '<div id="empty">暂无手动上传任务</div>';
+  return `<div class="manual-upload-progress manual-upload-records" aria-live="polite">${uploads.map(item => {
+    const statusText = _manualRecordStatusText(item);
+    const originalHref = `/download_original_pdf?job_id=${encodeURIComponent(item.job_id)}`;
+    const translatedHref = `/download_uploaded_pdf?job_id=${encodeURIComponent(item.job_id)}`;
+    const retry = item.can_retry_metadata
+      ? `<button class="management-retry-btn" data-job-id="${escAttr(item.job_id)}">重试识别</button>` : '';
+    const translated = item.translated_exists
+      ? `<a class="pdf-link" href="${escAttr(translatedHref)}" target="_blank">中文PDF</a>` : '';
+    const deleteDisabled = item.can_delete ? '' : ' disabled';
+    const deleteTitle = item.can_delete ? '' : '处理中，完成后才能删除';
+    const deleteButton = `<button class="management-delete-btn" data-job-id="${escAttr(item.job_id)}" data-source="manual"${deleteDisabled} title="${escAttr(deleteTitle)}">删除</button>`;
+    const filename = item.filename || item.title || '未命名PDF';
+    return `<div class="manual-upload-item status-${_manualRecordStatusClass(item)}">
+      <span class="manual-upload-filename" title="${escAttr(filename)}">${esc(filename)}</span>
+      <span class="manual-upload-status" title="${escAttr(statusText)}">${esc(statusText)}</span>
+      <span class="manual-upload-actions"><a class="pdf-link" href="${escAttr(originalHref)}" target="_blank">原PDF</a>${translated}${retry}${deleteButton}</span>
+    </div>`;
+  }).join('')}</div>`;
+}
+
 async function loadManagement() {
   currentView = 'management';
   _setCategoryActive('');
@@ -486,7 +523,7 @@ async function loadManualPapers() {
   _clearManagementRefresh();
   _setRssControls(false);
   const toolbar = '<div class="manual-upload-toolbar"><h2>手动上传论文</h2><button id="manual-upload-btn">上传PDF</button><button id="manual-refresh-btn">刷新</button><button id="manual-return-btn">返回论文浏览</button></div>';
-  mainEl.innerHTML = `<div class="management-panel">${toolbar}<div id="manual-upload-progress"></div><span class="spinner"></span> 加载中...</div>`;
+  mainEl.innerHTML = `${toolbar}<div id="manual-upload-progress"></div><span class="spinner"></span> 加载中...`;
   _renderManualUploadProgress();
   document.getElementById('manual-upload-btn').addEventListener('click', () => manualUploadInput.click());
   document.getElementById('manual-refresh-btn').addEventListener('click', loadManualPapers);
@@ -496,7 +533,7 @@ async function loadManualPapers() {
     const data = await response.json();
     const manualUploads = (data.uploads || []).filter(item => item.source_type === 'manual');
     const active = manualUploads.some(item => !item.can_delete);
-    mainEl.innerHTML = `<div class="management-panel">${toolbar}<div id="manual-upload-progress"></div>${_renderManagementRows(manualUploads)}</div>`;
+    mainEl.innerHTML = `${toolbar}<div id="manual-upload-progress"></div>${_renderManualUploadRows(manualUploads)}`;
     _renderManualUploadProgress();
     document.getElementById('manual-upload-btn').addEventListener('click', () => manualUploadInput.click());
     document.getElementById('manual-refresh-btn').addEventListener('click', loadManualPapers);
