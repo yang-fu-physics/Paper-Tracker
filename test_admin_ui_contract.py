@@ -53,6 +53,8 @@ class AdminUiContractTests(unittest.TestCase):
         self.assertIn(".manual-upload-toolbar", css)
         self.assertIn(".manual-upload-progress", css)
         self.assertIn(".manual-upload-item", css)
+        self.assertIn("grid-template-columns: minmax(0, 2fr)", css)
+        self.assertIn(".management-main small { white-space: nowrap;", css)
 
 
 if __name__ == "__main__":
