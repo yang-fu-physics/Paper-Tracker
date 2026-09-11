@@ -388,7 +388,7 @@ function _managementStatusText(item) {
     ? `元数据：${item.metadata_status || '未开始'}${item.metadata_stage ? `（${item.metadata_stage}）` : ''}`
     : '已有论文附件';
   const full = `全文翻译：${item.status || '未开始'}`;
-  const error = item.metadata_error || item.error;
+  const error = item.metadata_status === 'done' ? '' : item.metadata_error || item.error;
   return `${metadata}；${full}${error ? `；错误：${esc(error)}` : ''}`;
 }
 
@@ -427,7 +427,7 @@ function _manualRecordStatusClass(item) {
 function _manualRecordStatusText(item) {
   const metadata = `元数据：${item.metadata_status || '未开始'}${item.metadata_stage ? `（${item.metadata_stage}）` : ''}`;
   const full = `全文翻译：${item.status || '未开始'}`;
-  const error = item.metadata_error || item.error;
+  const error = item.metadata_status === 'done' ? '' : item.metadata_error || item.error;
   return `${metadata}；${full}${error ? `；错误：${error}` : ''}`;
 }
 
