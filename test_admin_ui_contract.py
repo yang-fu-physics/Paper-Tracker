@@ -10,6 +10,7 @@ class AdminUiContractTests(unittest.TestCase):
         self.assertIn('id="btn-management"', html)
         self.assertIn('id="btn-manual-papers"', html)
         self.assertIn('id="manual-upload-input"', html)
+        self.assertIn('id="manual-upload-input" accept=".pdf" multiple', html)
         self.assertIn('data-filter="manual"', html)
 
     def test_javascript_has_persisted_management_and_manual_card_routes(self):
@@ -24,6 +25,10 @@ class AdminUiContractTests(unittest.TestCase):
         self.assertIn("function toggleManageMode", js)
         self.assertIn("删除原PDF", js)
         self.assertIn("btnManagement.addEventListener('click', toggleManageMode)", js)
+        self.assertIn("async function uploadManualPdfs", js)
+        self.assertIn("Array.from(manualUploadInput.files || [])", js)
+        self.assertIn("Promise.allSettled", js)
+        self.assertIn("manual-upload-progress", js)
 
     def test_reload_actions_preserve_current_scroll_position(self):
         js = (ROOT / "static/js/app.js").read_text(encoding="utf-8")
@@ -37,6 +42,8 @@ class AdminUiContractTests(unittest.TestCase):
         self.assertIn(".management-panel", css)
         self.assertIn(".management-row", css)
         self.assertIn(".manual-upload-toolbar", css)
+        self.assertIn(".manual-upload-progress", css)
+        self.assertIn(".manual-upload-item", css)
 
 
 if __name__ == "__main__":

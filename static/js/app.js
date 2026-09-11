@@ -8,6 +8,8 @@ let currentSearch = '';
 let currentView = 'rss';
 let manageMode = false;
 let managementRefreshTimer = null;
+let manualUploadBatch = null;
+let manualUploadBatchTimer = null;
 let currentPage = 1; // Used for date view if needed, actually date view doesn't use it.
 let currentJournalsPage = 1;
 let currentArxivsPage = 1;
@@ -283,6 +285,104 @@ function _setRssControls(visible) {
   document.querySelector('.date-nav-controls').style.display = visible ? 'inline-flex' : 'none';
 }
 
+const MANUAL_BATCH_TERMINAL = new Set(['done', 'error']);
+
+function _manualUploadBatchActive() {
+  return Boolean(
+    manualUploadBatch &&
+    manualUploadBatch.items.some(item => !MANUAL_BATCH_TERMINAL.has(item.status))
+  );
+}
+
+function _manualUploadProgressMarkup() {
+  if (!manualUploadBatch) return '';
+  const items = manualUploadBatch.items;
+  const done = items.filter(item => item.status === 'done').length;
+  const failed = items.filter(item => item.status === 'error').length;
+  const processing = items.length - done - failed;
+  const summary = `完成 ${done}/${items.length}` +
+    (failed ? `，失败 ${failed}` : '') +
+    (processing ? `，处理中 ${processing}` : '');
+  const rows = items.map(item => {
+    let status = '等待提交';
+    if (item.status === 'uploading') status = '上传中';
+    else if (item.status === 'processing') status = item.stage ? `识别中（${item.stage}）` : '识别中';
+    else if (item.status === 'done') status = '已完成';
+    else if (item.status === 'error') status = `失败：${item.error || '未知错误'}`;
+    return `<div class="manual-upload-item status-${item.status}">
+      <span class="manual-upload-filename" title="${escAttr(item.name)}">${esc(item.name)}</span>
+      <span class="manual-upload-status">${esc(status)}</span>
+    </div>`;
+  }).join('');
+  const syncError = manualUploadBatch.syncError
+    ? `<div class="manual-upload-sync-error">${esc(manualUploadBatch.syncError)}</div>` : '';
+  return `<div class="manual-upload-progress" aria-live="polite">
+    <div class="manual-upload-progress-header"><strong>本批手动上传</strong><span>${summary}</span></div>
+    ${syncError}${rows}
+  </div>`;
+}
+
+function _renderManualUploadProgress() {
+  const container = document.getElementById('manual-upload-progress');
+  if (!container) return;
+  container.hidden = !manualUploadBatch;
+  container.innerHTML = _manualUploadProgressMarkup();
+}
+
+async function _syncManualUploadBatch() {
+  if (!manualUploadBatch) return;
+  const pendingItems = manualUploadBatch.items.filter(
+    item => item.jobId && !MANUAL_BATCH_TERMINAL.has(item.status)
+  );
+  if (!pendingItems.length) {
+    _renderManualUploadProgress();
+    return;
+  }
+  try {
+    const response = await fetch('/api/admin/uploads');
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const records = (await response.json()).uploads || [];
+    const byJobId = new Map(records.map(record => [record.job_id, record]));
+    let cardReady = false;
+    for (const item of pendingItems) {
+      const record = byJobId.get(item.jobId);
+      if (!record) continue;
+      const previous = item.status;
+      if (record.metadata_status === 'done') {
+        item.status = 'done';
+        item.stage = 'card_ready';
+        cardReady = cardReady || previous !== 'done';
+      } else if (record.metadata_status === 'error' || record.metadata_status === 'interrupted' || record.status === 'error') {
+        item.status = 'error';
+        item.stage = record.metadata_stage || '';
+        item.error = record.metadata_error || record.error || '识别失败';
+      } else {
+        item.status = 'processing';
+        item.stage = record.metadata_stage || record.metadata_status || 'queued';
+      }
+    }
+    manualUploadBatch.syncError = '';
+    _renderManualUploadProgress();
+    if (_manualUploadBatchActive()) {
+      manualUploadBatchTimer = setTimeout(_syncManualUploadBatch, 2500);
+    } else if (cardReady) {
+      manualUploadBatchTimer = null;
+      if (currentView === 'manual') await _reloadCurrentView({ preserveScroll: true });
+      else if (currentView === 'management') await loadManagement();
+    }
+  } catch (error) {
+    manualUploadBatch.syncError = '状态读取失败，正在重试';
+    _renderManualUploadProgress();
+    manualUploadBatchTimer = setTimeout(_syncManualUploadBatch, 5000);
+  }
+}
+
+function _startManualUploadBatchPolling() {
+  if (manualUploadBatchTimer) clearTimeout(manualUploadBatchTimer);
+  manualUploadBatchTimer = null;
+  _syncManualUploadBatch();
+}
+
 function _managementStatusText(item) {
   const metadata = item.source_type === 'manual'
     ? `元数据：${item.metadata_status || '未开始'}${item.metadata_stage ? `（${item.metadata_stage}）` : ''}`
@@ -321,13 +421,15 @@ async function loadManagement() {
   _setCategoryActive('');
   _clearManagementRefresh();
   _setRssControls(false);
-  mainEl.innerHTML = '<div class="management-panel"><div class="manual-upload-toolbar"><h2>上传管理</h2><button id="management-upload-btn">手动上传PDF</button></div><span class="spinner"></span> 加载中...</div>';
+  mainEl.innerHTML = '<div class="management-panel"><div class="manual-upload-toolbar"><h2>上传管理</h2><button id="management-upload-btn">手动上传PDF</button></div><div id="manual-upload-progress"></div><span class="spinner"></span> 加载中...</div>';
+  _renderManualUploadProgress();
   document.getElementById('management-upload-btn').addEventListener('click', () => manualUploadInput.click());
   try {
     const response = await fetch('/api/admin/uploads');
     const data = await response.json();
     const active = (data.uploads || []).some(item => !item.can_delete);
-    mainEl.innerHTML = `<div class="management-panel"><div class="manual-upload-toolbar"><h2>上传管理</h2><button id="management-upload-btn">手动上传PDF</button><button id="management-refresh-btn">刷新</button></div>${_renderManagementRows(data.uploads || [])}</div>`;
+    mainEl.innerHTML = `<div class="management-panel"><div class="manual-upload-toolbar"><h2>上传管理</h2><button id="management-upload-btn">手动上传PDF</button><button id="management-refresh-btn">刷新</button></div><div id="manual-upload-progress"></div>${_renderManagementRows(data.uploads || [])}</div>`;
+    _renderManualUploadProgress();
     document.getElementById('management-upload-btn').addEventListener('click', () => manualUploadInput.click());
     document.getElementById('management-refresh-btn').addEventListener('click', loadManagement);
     document.querySelectorAll('.management-delete-btn').forEach(btn => btn.addEventListener('click', onManagementDelete));
@@ -379,12 +481,14 @@ async function loadManualPapers() {
   _setCategoryActive('manual');
   _clearManagementRefresh();
   _setRssControls(false);
-  mainEl.innerHTML = '<div class="manual-upload-toolbar"><h2>手动上传论文</h2><button id="manual-upload-btn">上传PDF</button></div><span class="spinner"></span> 加载中...';
+  mainEl.innerHTML = '<div class="manual-upload-toolbar"><h2>手动上传论文</h2><button id="manual-upload-btn">上传PDF</button></div><div id="manual-upload-progress"></div><span class="spinner"></span> 加载中...';
+  _renderManualUploadProgress();
   document.getElementById('manual-upload-btn').addEventListener('click', () => manualUploadInput.click());
   try {
     const response = await fetch('/api/manual-papers');
     const data = await response.json();
-    mainEl.innerHTML = `<div class="manual-upload-toolbar"><h2>手动上传论文</h2><button id="manual-upload-btn">上传PDF</button><button id="manual-refresh-btn">刷新</button></div>${data.papers && data.papers.length ? `<div class="grid-container">${data.papers.map(p => '').join('')}</div>` : '<div id="empty">暂无已识别的手动论文</div>'}`;
+    mainEl.innerHTML = `<div class="manual-upload-toolbar"><h2>手动上传论文</h2><button id="manual-upload-btn">上传PDF</button><button id="manual-refresh-btn">刷新</button></div><div id="manual-upload-progress"></div>${data.papers && data.papers.length ? `<div class="grid-container">${data.papers.map(p => '').join('')}</div>` : '<div id="empty">暂无已识别的手动论文</div>'}`;
+    _renderManualUploadProgress();
     document.getElementById('manual-upload-btn').addEventListener('click', () => manualUploadInput.click());
     document.getElementById('manual-refresh-btn').addEventListener('click', loadManualPapers);
     if (data.papers && data.papers.length) {
@@ -978,24 +1082,57 @@ function startUploadPollingCard(url, btn, jobId = '') {
   document.addEventListener('visibilitychange', onVisible);
 }
 
-async function uploadManualPdf(file) {
+async function _submitManualPdf(file, item) {
+  item.status = 'uploading';
+  item.error = '';
+  _renderManualUploadProgress();
   const formData = new FormData();
   formData.append('file', file);
   try {
     const response = await fetch('/api/admin/uploads', { method: 'POST', body: formData });
-    const data = await response.json();
+    const data = await response.json().catch(() => ({}));
     if (!response.ok || !data.ok) throw new Error(data.error || '上传失败');
-    if (currentView === 'management') await loadManagement();
-    else await loadManualPapers();
+    item.jobId = data.job_id;
+    item.status = 'processing';
+    item.stage = 'queued';
+    _renderManualUploadProgress();
+    return data;
   } catch (error) {
-    window.alert(`手动上传失败：${error.message || error}`);
+    item.status = 'error';
+    item.error = error.message || String(error);
+    _renderManualUploadProgress();
+    throw error;
   }
 }
 
+async function uploadManualPdfs(files) {
+  if (!files.length) return;
+  if (_manualUploadBatchActive()) {
+    window.alert('上一批文件仍在处理中，请等待完成后再上传。');
+    return;
+  }
+  manualUploadBatch = {
+    syncError: '',
+    items: files.map(file => ({
+      name: file.name,
+      status: 'queued',
+      stage: '',
+      jobId: '',
+      error: '',
+    })),
+  };
+  _renderManualUploadProgress();
+  await Promise.allSettled(files.map((file, index) =>
+    _submitManualPdf(file, manualUploadBatch.items[index])
+  ));
+  _renderManualUploadProgress();
+  _startManualUploadBatchPolling();
+}
+
 manualUploadInput.addEventListener('change', async () => {
-  const file = manualUploadInput.files[0];
+  const files = Array.from(manualUploadInput.files || []);
   manualUploadInput.value = '';
-  if (file) await uploadManualPdf(file);
+  await uploadManualPdfs(files);
 });
 
 btnManagement.addEventListener('click', toggleManageMode);

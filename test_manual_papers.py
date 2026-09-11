@@ -91,6 +91,22 @@ class ManualPaperTests(unittest.TestCase):
         self.assertTrue(Path(row[2]).is_file())
         self.assertEqual(row[3], hashlib.sha256(b"%PDF-1.7\nfictional").hexdigest())
 
+    def test_multiple_manual_uploads_create_independent_jobs(self):
+        first, first_starter = self.upload("first.pdf")
+        second, second_starter = self.upload("second.pdf")
+        self.assertEqual(first.status_code, 202)
+        self.assertEqual(second.status_code, 202)
+        first_job = first.get_json()["job_id"]
+        second_job = second.get_json()["job_id"]
+        self.assertNotEqual(first_job, second_job)
+        self.assertEqual(first_starter.call_args.args, (first_job,))
+        self.assertEqual(second_starter.call_args.args, (second_job,))
+        with sqlite3.connect(self.papers_db) as db:
+            rows = db.execute(
+                "SELECT job_id, filename FROM upload_translations ORDER BY filename"
+            ).fetchall()
+        self.assertEqual(rows, [(first_job, "first.pdf"), (second_job, "second.pdf")])
+
     def test_manual_metadata_worker_persists_card_and_reuses_cached_latex(self):
         response, _ = self.upload()
         job_id = response.get_json()["job_id"]

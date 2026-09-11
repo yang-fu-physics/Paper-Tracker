@@ -197,6 +197,17 @@ main { max-width: 1500px; margin: 30px auto; padding: 0 24px; padding-bottom: 60
 .management-retry-btn { color: #92400e; border-color: #fde68a; }
 .error-box { padding: 24px; color: #b91c1c; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .metadata-warning { color: #92400e; }
+.manual-upload-progress { margin: 0 0 20px; padding: 12px 14px; border: 1px solid #cbd5e1; border-radius: 12px; background: rgba(248,250,252,0.85); }
+.manual-upload-progress[hidden] { display: none; }
+.manual-upload-progress-header { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 8px; color: #475569; }
+.manual-upload-progress-header strong { color: #334155; }
+.manual-upload-item { display: flex; justify-content: space-between; gap: 12px; padding: 6px 0; border-top: 1px solid #e2e8f0; font-size: 0.85rem; }
+.manual-upload-filename { min-width: 0; overflow-wrap: anywhere; }
+.manual-upload-status { flex: 0 0 auto; color: #64748b; }
+.manual-upload-item.status-done .manual-upload-status { color: #15803d; }
+.manual-upload-item.status-error .manual-upload-status, .manual-upload-sync-error { color: #b91c1c; }
+.manual-upload-item.status-processing .manual-upload-status, .manual-upload-item.status-uploading .manual-upload-status { color: #b45309; }
+.manual-upload-sync-error { padding: 4px 0 8px; font-size: 0.82rem; }
 
 @media (prefers-color-scheme: dark) {
   body { background: linear-gradient(135deg, #1a202c 0%, #2d3748 100%); color: #e2e8f0; }
@@ -226,6 +237,10 @@ main { max-width: 1500px; margin: 30px auto; padding: 0 24px; padding-bottom: 60
 
   .date-picker, .search-input, button { background: #2d3748; border-color: #4a5568; color: #e2e8f0; }
   .management-panel, .management-row { background: rgba(45,55,72,0.85); border-color: rgba(255,255,255,0.1); }
+  .manual-upload-progress { background: rgba(26,32,44,0.75); border-color: rgba(255,255,255,0.1); }
+  .manual-upload-progress-header, .manual-upload-status { color: #a0aec0; }
+  .manual-upload-progress-header strong { color: #e2e8f0; }
+  .manual-upload-item { border-top-color: rgba(255,255,255,0.1); }
   .manual-upload-toolbar h2 { color: #e2e8f0; }
   button:hover:not(:disabled) { background: #4a5568; }
   .section-title::after { background: #4a5568; }
