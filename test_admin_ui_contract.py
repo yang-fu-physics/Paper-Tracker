@@ -12,10 +12,11 @@ class AdminUiContractTests(unittest.TestCase):
         self.assertIn('id="manual-upload-input"', html)
         self.assertIn('id="manual-upload-input" accept=".pdf" multiple', html)
         self.assertIn('data-filter="manual"', html)
+        self.assertIn('data-filter="归档"', html)
 
     def test_javascript_has_persisted_management_and_manual_card_routes(self):
         js = (ROOT / "static/js/app.js").read_text(encoding="utf-8")
-        for route in ("/api/admin/uploads", "/api/manual-papers", "/api/admin/uploads/", "/translate_uploaded_pdf"):
+        for route in ("/api/admin/uploads", "/api/admin/uploads/", "/translate_uploaded_pdf"):
             self.assertIn(route, js)
         self.assertIn("source_type", js)
         self.assertIn("仅删除这个PDF附件，保留原论文和标签", js)
@@ -25,10 +26,18 @@ class AdminUiContractTests(unittest.TestCase):
         self.assertIn("function toggleManageMode", js)
         self.assertIn("删除原PDF", js)
         self.assertIn("btnManagement.addEventListener('click', toggleManageMode)", js)
+        self.assertIn("archive-btn", js)
+        self.assertIn("归档", js)
+        self.assertIn("async function onArchive", js)
         self.assertIn("async function uploadManualPdfs", js)
         self.assertIn("Array.from(manualUploadInput.files || [])", js)
         self.assertIn("Promise.allSettled", js)
         self.assertIn("manual-upload-progress", js)
+        self.assertIn('id="manual-return-btn"', js)
+        self.assertIn("manualUploads = (data.uploads || []).filter", js)
+        self.assertIn("_renderManagementRows(manualUploads)", js)
+        manual_view = js.split("async function loadManualPapers", 1)[1].split("function returnToRss", 1)[0]
+        self.assertNotIn("makeCard(", manual_view)
 
     def test_reload_actions_preserve_current_scroll_position(self):
         js = (ROOT / "static/js/app.js").read_text(encoding="utf-8")

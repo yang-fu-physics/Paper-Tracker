@@ -443,6 +443,10 @@ async function loadManagement() {
   }
 }
 
+function _reloadUploadListView() {
+  return currentView === 'manual' ? loadManualPapers() : loadManagement();
+}
+
 async function onManagementDelete(event) {
   const btn = event.currentTarget;
   const manual = btn.dataset.source === 'manual';
@@ -455,7 +459,7 @@ async function onManagementDelete(event) {
     const response = await fetch(`/api/admin/uploads/${encodeURIComponent(btn.dataset.jobId)}`, { method: 'DELETE' });
     const data = await response.json();
     if (!response.ok || !data.ok) throw new Error(data.error || '删除失败');
-    await loadManagement();
+    await _reloadUploadListView();
   } catch (error) {
     window.alert(`删除失败：${error.message || error}`);
     btn.disabled = false;
@@ -469,7 +473,7 @@ async function onManagementRetry(event) {
     const response = await fetch(`/api/admin/uploads/${encodeURIComponent(btn.dataset.jobId)}/process`, { method: 'POST' });
     const data = await response.json();
     if (!response.ok || !data.ok) throw new Error(data.error || '重试失败');
-    await loadManagement();
+    await _reloadUploadListView();
   } catch (error) {
     window.alert(`重试失败：${error.message || error}`);
     btn.disabled = false;
@@ -481,22 +485,30 @@ async function loadManualPapers() {
   _setCategoryActive('manual');
   _clearManagementRefresh();
   _setRssControls(false);
-  mainEl.innerHTML = '<div class="manual-upload-toolbar"><h2>手动上传论文</h2><button id="manual-upload-btn">上传PDF</button></div><div id="manual-upload-progress"></div><span class="spinner"></span> 加载中...';
+  const toolbar = '<div class="manual-upload-toolbar"><h2>手动上传论文</h2><button id="manual-upload-btn">上传PDF</button><button id="manual-refresh-btn">刷新</button><button id="manual-return-btn">返回论文浏览</button></div>';
+  mainEl.innerHTML = `<div class="management-panel">${toolbar}<div id="manual-upload-progress"></div><span class="spinner"></span> 加载中...</div>`;
   _renderManualUploadProgress();
   document.getElementById('manual-upload-btn').addEventListener('click', () => manualUploadInput.click());
+  document.getElementById('manual-refresh-btn').addEventListener('click', loadManualPapers);
+  document.getElementById('manual-return-btn').addEventListener('click', returnToRss);
   try {
-    const response = await fetch('/api/manual-papers');
+    const response = await fetch('/api/admin/uploads');
     const data = await response.json();
-    mainEl.innerHTML = `<div class="manual-upload-toolbar"><h2>手动上传论文</h2><button id="manual-upload-btn">上传PDF</button><button id="manual-refresh-btn">刷新</button></div><div id="manual-upload-progress"></div>${data.papers && data.papers.length ? `<div class="grid-container">${data.papers.map(p => '').join('')}</div>` : '<div id="empty">暂无已识别的手动论文</div>'}`;
+    const manualUploads = (data.uploads || []).filter(item => item.source_type === 'manual');
+    const active = manualUploads.some(item => !item.can_delete);
+    mainEl.innerHTML = `<div class="management-panel">${toolbar}<div id="manual-upload-progress"></div>${_renderManagementRows(manualUploads)}</div>`;
     _renderManualUploadProgress();
     document.getElementById('manual-upload-btn').addEventListener('click', () => manualUploadInput.click());
     document.getElementById('manual-refresh-btn').addEventListener('click', loadManualPapers);
-    if (data.papers && data.papers.length) {
-      const grid = mainEl.querySelector('.grid-container');
-      data.papers.forEach(p => grid.appendChild(makeCard(p)));
+    document.getElementById('manual-return-btn').addEventListener('click', returnToRss);
+    document.querySelectorAll('.management-delete-btn').forEach(btn => btn.addEventListener('click', onManagementDelete));
+    document.querySelectorAll('.management-retry-btn').forEach(btn => btn.addEventListener('click', onManagementRetry));
+    if (active && currentView === 'manual') {
+      managementRefreshTimer = setTimeout(loadManualPapers, 5000);
     }
   } catch (error) {
-    mainEl.innerHTML = `<div class="error-box">手动论文加载失败：${esc(error.message || error)}<button id="manual-refresh-btn">重试</button></div>`;
+    mainEl.innerHTML = `<div class="management-panel"><div class="manual-upload-toolbar"><h2>手动上传论文</h2><button id="manual-return-btn">返回论文浏览</button></div><div class="error-box">手动上传列表加载失败：${esc(error.message || error)}<button id="manual-refresh-btn">重试</button></div></div>`;
+    document.getElementById('manual-return-btn').addEventListener('click', returnToRss);
     document.getElementById('manual-refresh-btn').addEventListener('click', loadManualPapers);
   }
 }
@@ -575,6 +587,10 @@ function makeCard(p) {
   const arxivId = arxivIdMatch ? arxivIdMatch[1] : null;
   const uploadJobId = p.upload_job_id || p.job_id || '';
   const canManageUpload = manageMode && Boolean(uploadJobId && p.upload_translation_status);
+  const archived = (p.label || '').split(',').includes('归档');
+  const archiveButton = !isManual
+    ? `<button class="archive-btn" data-url="${escAttr(p.label_key || p.url)}" data-archived="${archived}">${archived ? '取消归档' : '归档'}</button>`
+    : '';
   let pdfLink = '';
   let zhPdfBtn = '';
 
@@ -653,7 +669,7 @@ function makeCard(p) {
 
   const labelKey = p.label_key || p.url;
   div.innerHTML = `
-    <div class="card-title"><a href="${escAttr(p.url)}" target="_blank">${escLatex(p.title)}</a>${pdfLink}${zhPdfBtn}</div>
+    <div class="card-title"><a href="${escAttr(p.url)}" target="_blank">${escLatex(p.title)}</a>${pdfLink}${zhPdfBtn}${archiveButton}</div>
     ${p.title_zh ? `<div class="card-title-zh">${escLatex(p.title_zh)}</div>` : ''}
     <div class="card-meta">${esc(p.journal || (isManual ? '手动上传' : ''))}</div>
     ${contentHtml}
@@ -666,6 +682,8 @@ function makeCard(p) {
   div.querySelectorAll('.lbl').forEach(btn => btn.addEventListener('click', onLabel));
   const deleteBtn = div.querySelector('.upload-delete-btn');
   if (deleteBtn) deleteBtn.addEventListener('click', onCardDeleteUpload);
+  const archiveBtn = div.querySelector('.archive-btn');
+  if (archiveBtn) archiveBtn.addEventListener('click', onArchive);
   if (arxivId) {
     const zhBtn = div.querySelector('.zh-pdf-btn');
     if (zhBtn) {
@@ -736,6 +754,36 @@ async function onZhPdf(btn) {
 
   btn.textContent = '翻译中';
   startPolling(arxivId, btn);
+}
+
+async function onArchive(event) {
+  const btn = event.currentTarget;
+  const card = btn.closest('.card');
+  const archived = btn.dataset.archived === 'true';
+  let labels = Array.from(card.querySelectorAll('.lbl'))
+    .filter(labelBtn => labelBtn.className.includes('active-'))
+    .map(labelBtn => labelBtn.dataset.label);
+  if (!labels.length) labels = ['不相关'];
+  if (archived) {
+    labels = labels.filter(label => label !== '归档');
+    if (!labels.length) labels = ['不相关'];
+  } else if (!labels.includes('归档')) {
+    labels.push('归档');
+  }
+  btn.disabled = true;
+  try {
+    const response = await fetch('/label', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: btn.dataset.url, labels }),
+    });
+    const data = await response.json();
+    if (!response.ok || !data.ok) throw new Error(data.error || '归档失败');
+    await _reloadCurrentView({ preserveScroll: true });
+  } catch (error) {
+    window.alert(`${archived ? '取消归档' : '归档'}失败：${error.message || error}`);
+    btn.disabled = false;
+  }
 }
 
 async function onLabel(e) {

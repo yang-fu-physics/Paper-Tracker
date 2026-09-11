@@ -33,6 +33,7 @@ _manual_jobs_semaphore = threading.BoundedSemaphore(2)
 
 MANUAL_SOURCE = "manual"
 RSS_SOURCE = "rss"
+ARCHIVED_LABEL = "归档"
 MANUAL_LABEL_PREFIX = "manual:"
 MAX_UPLOAD_BYTES = int(getattr(config, "MAX_UPLOAD_BYTES", 50 * 1024 * 1024))
 
@@ -40,7 +41,7 @@ BASE = Path(__file__).parent
 app = Flask(__name__, static_folder=str(BASE / "static"), static_url_path="/static")
 PAPERS_DB = BASE / "data" / "papers.db"
 LABELS_DB = BASE / "data" / "labels.db"
-VALID_LABELS = {"相关", "感兴趣", "可做", "组会报告", "不相关"}
+VALID_LABELS = {"相关", "感兴趣", "可做", "组会报告", "不相关", ARCHIVED_LABEL}
 UPLOAD_DIR = BASE / "data" / "uploads"
 
 
@@ -342,6 +343,9 @@ def papers():
         arxiv_match = re.search(r'abs/([^/?v]+)', url)
         arxiv_id = arxiv_match.group(1) if arxiv_match else None
         upload = uploads.get(url)
+        paper_label = labels.get(url, "不相关")
+        if ARCHIVED_LABEL in paper_label.split(","):
+            continue
         result.append({
             "url": url,
             "label_key": url,
@@ -354,7 +358,7 @@ def papers():
             "summary_zh": summary_zh or "",
             "abstract_en": abstract_en or "",
             "abstract_original": abstract_en or "",
-            "label": labels.get(url, "不相关"),
+            "label": paper_label,
             "is_arxiv": (journal or "").startswith("arXiv:"),
             "translation_status": translations.get(arxiv_id) if arxiv_id else None,
             "upload_translation_status": upload["status"] if upload else None,
@@ -375,9 +379,21 @@ def filter_papers():
 
     with papers_conn() as pc:
         pc.execute("ATTACH DATABASE ? AS ldb", (str(LABELS_DB),))
-        like1 = f"{label},%"
-        like2 = f"%,{label},%"
-        like3 = f"%,{label}"
+        label_patterns = (label, f"{label},%", f"%,{label},%", f"%,{label}")
+        archive_patterns = (
+            ARCHIVED_LABEL,
+            f"{ARCHIVED_LABEL},%",
+            f"%,{ARCHIVED_LABEL},%",
+            f"%,{ARCHIVED_LABEL}",
+        )
+        label_expr = "(l.label = ? OR l.label LIKE ? OR l.label LIKE ? OR l.label LIKE ?)"
+        archive_expr = "(l.label = ? OR l.label LIKE ? OR l.label LIKE ? OR l.label LIKE ?)"
+        if label == ARCHIVED_LABEL:
+            label_condition = archive_expr
+            label_params = archive_patterns
+        else:
+            label_condition = f"{label_expr} AND NOT {archive_expr}"
+            label_params = label_patterns + archive_patterns
         type_filter = ""
         type_params = ()
         paper_type = request.args.get("paper_type", "")
@@ -388,26 +404,27 @@ def filter_papers():
 
         q = f"""
             SELECT p.url, p.journal, p.title, p.pushed_at,
-                   e.title_zh, e.abstract_zh, e.summary_zh, e.abstract_en
+                   e.title_zh, e.abstract_zh, e.summary_zh, e.abstract_en,
+                   l.label
             FROM pushed_papers p
             JOIN ldb.paper_labels l ON p.url = l.url
             LEFT JOIN paper_evaluations e ON p.url = e.url
-            WHERE (l.label = ? OR l.label LIKE ? OR l.label LIKE ? OR l.label LIKE ?)
+            WHERE {label_condition}
             {type_filter}
             ORDER BY p.pushed_at DESC
             LIMIT ? OFFSET ?
         """
-        rows = pc.execute(q, (label, like1, like2, like3, limit, offset)).fetchall()
-        
-        q_count = f"SELECT COUNT(*) FROM ldb.paper_labels l JOIN pushed_papers p ON p.url = l.url WHERE (l.label = ? OR l.label LIKE ? OR l.label LIKE ? OR l.label LIKE ?) {type_filter}"
-        total = pc.execute(q_count, (label, like1, like2, like3)).fetchone()[0]
+        rows = pc.execute(q, (*label_params, limit, offset)).fetchall()
+
+        q_count = f"SELECT COUNT(*) FROM ldb.paper_labels l JOIN pushed_papers p ON p.url = l.url WHERE {label_condition} {type_filter}"
+        total = pc.execute(q_count, label_params).fetchone()[0]
         has_next = (offset + limit) < total
         translations = {k: v["status"] for k, v in _translate_jobs.items()}
         pc.execute("DETACH DATABASE ldb")
 
     uploads = _upload_index()
     result = []
-    for url, journal, title, pushed_at, title_zh, abstract_zh, summary_zh, abstract_en in rows:
+    for url, journal, title, pushed_at, title_zh, abstract_zh, summary_zh, abstract_en, paper_label in rows:
         arxiv_match = re.search(r'abs/([^/?v]+)', url)
         arxiv_id = arxiv_match.group(1) if arxiv_match else None
         upload = uploads.get(url)
@@ -423,7 +440,7 @@ def filter_papers():
             "summary_zh": summary_zh or "",
             "abstract_en": abstract_en or "",
             "abstract_original": abstract_en or "",
-            "label": label,
+            "label": paper_label or label,
             "is_arxiv": (journal or "").startswith("arXiv:"),
             "translation_status": translations.get(arxiv_id) if arxiv_id else None,
             "upload_translation_status": upload["status"] if upload else None,
@@ -453,6 +470,13 @@ def search_papers():
             type_filter = " AND p.journal NOT LIKE 'arXiv:%'"
 
         like_str = f"%{q_str}%"
+        archive_patterns = (
+            ARCHIVED_LABEL,
+            f"{ARCHIVED_LABEL},%",
+            f"%,{ARCHIVED_LABEL},%",
+            f"%,{ARCHIVED_LABEL}",
+        )
+        archive_condition = "NOT (l.label = ? OR l.label LIKE ? OR l.label LIKE ? OR l.label LIKE ?)"
         q_sql = f"""
             SELECT p.url, p.journal, p.title, p.pushed_at,
                    e.title_zh, e.abstract_zh, e.summary_zh, e.abstract_en,
@@ -460,27 +484,30 @@ def search_papers():
             FROM pushed_papers p
             LEFT JOIN paper_evaluations e ON p.url = e.url
             LEFT JOIN ldb.paper_labels l ON p.url = l.url
-            WHERE (p.title LIKE ? 
+            WHERE (p.title LIKE ?
                OR p.journal LIKE ?
                OR e.title_zh LIKE ?
                OR e.abstract_zh LIKE ?
                OR e.summary_zh LIKE ?
                OR e.abstract_en LIKE ?)
+               AND {archive_condition}
                {type_filter}
             ORDER BY p.pushed_at DESC
             LIMIT ? OFFSET ?
         """
-        params = (like_str, like_str, like_str, like_str, like_str, like_str, limit, offset)
+        params = (like_str, like_str, like_str, like_str, like_str, like_str, *archive_patterns, limit, offset)
         rows = pc.execute(q_sql, params).fetchall()
         
         q_count = f"""
-            SELECT COUNT(*) 
+            SELECT COUNT(*)
             FROM pushed_papers p
             LEFT JOIN paper_evaluations e ON p.url = e.url
+            LEFT JOIN ldb.paper_labels l ON p.url = l.url
             WHERE (p.title LIKE ? OR p.journal LIKE ? OR e.title_zh LIKE ? OR e.abstract_zh LIKE ? OR e.summary_zh LIKE ? OR e.abstract_en LIKE ?)
-            {type_filter}
+              AND {archive_condition}
+              {type_filter}
         """
-        total = pc.execute(q_count, (like_str, like_str, like_str, like_str, like_str, like_str)).fetchone()[0]
+        total = pc.execute(q_count, (like_str, like_str, like_str, like_str, like_str, like_str, *archive_patterns)).fetchone()[0]
         has_next = (offset + limit) < total
         translations = {k: v["status"] for k, v in _translate_jobs.items()}
         pc.execute("DETACH DATABASE ldb")

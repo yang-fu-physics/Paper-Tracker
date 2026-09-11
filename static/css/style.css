@@ -84,6 +84,8 @@ main { max-width: 1500px; margin: 30px auto; padding: 0 24px; padding-bottom: 60
 .pdf-link, .upload-orig-btn, .upload-delete-btn { font-size: 0.75rem; font-weight: 700; color: #fff !important; background: #4f46e5; border: none; padding: 4px 10px; border-radius: 20px; text-decoration: none !important; white-space: nowrap; box-shadow: 0 2px 4px rgba(79, 70, 229, 0.3); transition: all 0.2s; cursor: pointer; }
 .pdf-link:hover, .upload-orig-btn:hover:not(:disabled), .upload-delete-btn:hover:not(:disabled) { background: #4338ca; transform: scale(1.05); }
 .upload-delete-btn { background: #b91c1c; box-shadow: 0 2px 4px rgba(185, 28, 28, 0.3); }
+.archive-btn { font-size: 0.75rem; font-weight: 700; color: #fff; background: #64748b; border: none; padding: 4px 10px; border-radius: 20px; white-space: nowrap; box-shadow: 0 2px 4px rgba(100,116,139,0.3); transition: all 0.2s; cursor: pointer; }
+.archive-btn:hover:not(:disabled) { background: #475569; transform: scale(1.05); }
 .zh-pdf-btn, .upload-zh-btn { font-size: 0.75rem; font-weight: 700; color: #fff; background: #d97706; border: none; padding: 4px 10px; border-radius: 20px; margin-left: 6px; box-shadow: 0 2px 4px rgba(217,119,6,0.3); transition: all 0.2s; }
 .zh-pdf-btn:hover:not(:disabled), .upload-zh-btn:hover:not(:disabled) { background: #b45309; transform: scale(1.05); }
 .zh-pdf-status { font-size: 0.75rem; font-weight: 600; color: #d97706; margin-left: 6px; white-space: nowrap; }
