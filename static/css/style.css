@@ -216,6 +216,8 @@ main { max-width: 1500px; margin: 30px auto; padding: 0 24px; padding-bottom: 60
 .manual-upload-records .manual-upload-status { min-width: 0; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .manual-upload-actions { display: flex; align-items: center; gap: 4px; flex: 0 0 auto; }
 .manual-upload-actions button, .manual-upload-actions .pdf-link { padding: 4px 8px; font-size: 0.75rem; }
+.manual-translate-btn { color: #fff; background: #4f46e5; border-color: #4f46e5; }
+.manual-translate-btn:hover:not(:disabled) { background: #4338ca; border-color: #4338ca; }
 
 @media (prefers-color-scheme: dark) {
   body { background: linear-gradient(135deg, #1a202c 0%, #2d3748 100%); color: #e2e8f0; }

@@ -37,8 +37,14 @@ class AdminUiContractTests(unittest.TestCase):
         self.assertIn("manualUploads = (data.uploads || []).filter", js)
         self.assertIn("_renderManualUploadRows(manualUploads)", js)
         self.assertIn("manual-upload-actions", js)
-        manual_view = js.split("async function loadManualPapers", 1)[1].split("function returnToRss", 1)[0]
-        self.assertNotIn("makeCard(", manual_view)
+        self.assertIn("manual-translate-btn", js)
+        self.assertIn("onManualFullTranslation", js)
+        self.assertIn("async function loadManualUploadPage", js)
+        self.assertIn("async function loadManualPapers", js)
+        upload_view = js.split("async function loadManualUploadPage", 1)[1].split("function returnToRss", 1)[0]
+        self.assertNotIn("makeCard(", upload_view)
+        category_view = js.split("async function loadManualPapers", 1)[1].split("async function loadManualUploadPage", 1)[0]
+        self.assertIn("makeCard(", category_view)
 
     def test_reload_actions_preserve_current_scroll_position(self):
         js = (ROOT / "static/js/app.js").read_text(encoding="utf-8")
@@ -56,6 +62,7 @@ class AdminUiContractTests(unittest.TestCase):
         self.assertIn(".manual-upload-item", css)
         self.assertIn(".manual-upload-records", css)
         self.assertIn(".manual-upload-actions", css)
+        self.assertIn(".manual-translate-btn", css)
 
 
 if __name__ == "__main__":
