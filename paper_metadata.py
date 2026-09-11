@@ -20,6 +20,7 @@ _INCLUDE_RE = re.compile(r"\\(?:input|include)\s*\{([^{}]+)\}")
 _TRANSLATED_PREFIX = "translated_"
 _DEFAULT_MAX_SOURCE_CHARS = 120_000
 _DEFAULT_ATTEMPTS = 3
+_JSON_DECODER = json.JSONDecoder()
 
 
 def _inside(root: Path, candidate: Path) -> Path | None:
@@ -89,6 +90,74 @@ def collect_latex_source(tex_dir: str | Path, max_chars: int = _DEFAULT_MAX_SOUR
     return source
 
 
+def _repair_json_string_escapes(text: str) -> str:
+    """Repair common model errors where LaTeX backslashes are not JSON-escaped."""
+    result: list[str] = []
+    in_string = False
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char == '"' and (index == 0 or text[index - 1] != "\\"):
+            in_string = not in_string
+            result.append(char)
+            index += 1
+            continue
+        if not in_string:
+            result.append(char)
+            index += 1
+            continue
+        if char == "\\":
+            if index + 1 >= len(text):
+                result.append("\\\\")
+                index += 1
+                continue
+            next_char = text[index + 1]
+            valid_simple = next_char in '"\\/'
+            valid_unicode = (
+                next_char == "u"
+                and index + 5 < len(text)
+                and re.fullmatch(r"[0-9a-fA-F]{4}", text[index + 2:index + 6])
+            )
+            # Keep ordinary JSON escapes, but treat commands such as \\begin,
+            # \\text and \\nabla as unescaped LaTeX when letters follow them.
+            valid_short = next_char in "bfnrt" and (
+                index + 2 >= len(text) or not text[index + 2].isalpha()
+            )
+            if valid_simple or valid_unicode or valid_short:
+                result.append(text[index:index + (6 if valid_unicode else 2)])
+                index += 6 if valid_unicode else 2
+            else:
+                result.append("\\\\")
+                index += 1
+            continue
+        if ord(char) < 0x20:
+            result.append({"\n": "\\n", "\r": "\\r", "\t": "\\t"}.get(char, "\\u%04x" % ord(char)))
+        else:
+            result.append(char)
+        index += 1
+    return "".join(result)
+
+
+def _decode_metadata_object(text: str) -> Any:
+    saw_object_start = False
+    repaired = False
+    for candidate_text in (text, _repair_json_string_escapes(text)):
+        repaired = repaired or candidate_text != text
+        for match in re.finditer(r"\{", candidate_text):
+            saw_object_start = True
+            try:
+                value, _end = _JSON_DECODER.raw_decode(candidate_text[match.start():])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, dict):
+                return value
+    if saw_object_start and repaired:
+        raise MetadataError("metadata API returned malformed metadata JSON")
+    if saw_object_start:
+        raise MetadataError("metadata API returned malformed metadata JSON")
+    raise MetadataError("metadata API did not return a JSON object")
+
+
 def _content_from_response(response: Any) -> Any:
     try:
         body = response.json()
@@ -100,18 +169,20 @@ def _content_from_response(response: Any) -> Any:
         raise MetadataError("metadata API response has no message content") from exc
     if isinstance(content, dict):
         return content
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, str):
+                parts.append(part)
+            elif isinstance(part, dict) and isinstance(part.get("text"), str):
+                parts.append(part["text"])
+        content = "\n".join(parts)
     if not isinstance(content, str):
         raise MetadataError("metadata API message content is not text")
     cleaned = content.strip()
-    cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"\s*```$", "", cleaned)
-    start, end = cleaned.find("{"), cleaned.rfind("}")
-    if start < 0 or end < start:
-        raise MetadataError("metadata API did not return a JSON object")
-    try:
-        return json.loads(cleaned[start : end + 1])
-    except json.JSONDecodeError as exc:
-        raise MetadataError("metadata API returned malformed metadata JSON") from exc
+    cleaned = re.sub(r"^\s*```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s*```\s*$", "", cleaned)
+    return _decode_metadata_object(cleaned)
 
 
 def _text_field(payload: dict[str, Any], *names: str) -> str:

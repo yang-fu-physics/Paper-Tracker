@@ -108,7 +108,30 @@ class PaperMetadataTests(unittest.TestCase):
         self.assertEqual(result["original_title"], "T")
         self.assertEqual(post.call_count, 2)
 
-    def test_bad_model_json_is_rejected(self):
+    def test_content_parser_accepts_explanation_and_unescaped_latex_backslashes(self):
+        response = Mock()
+        response.json.return_value = {
+            "choices": [{
+                "message": {
+                    "content": '结果如下：```json\n{"original_title":"Fictional","title_zh":"虚构","abstract_zh":"含有 \\alpha 和 \\begin{abstract}","source_language":"en"}\n```'
+                }
+            }]
+        }
+        result = paper_metadata._content_from_response(response)
+        self.assertEqual(result["abstract_zh"], r"含有 \alpha 和 \begin{abstract}")
+
+    def test_content_parser_ignores_braces_before_and_after_json(self):
+        response = Mock()
+        response.json.return_value = {
+            "choices": [{
+                "message": {
+                    "content": "说明中的 LaTeX \\text{data}。" + '{"original_title":"Fictional","title_zh":"虚构","source_language":"en"}' + " 以上。"
+                }
+            }]
+        }
+        result = paper_metadata._content_from_response(response)
+        self.assertEqual(result["original_title"], "Fictional")
+
         with self.assertRaises(paper_metadata.MetadataError):
             paper_metadata.validate_metadata({"title_zh": "only translated"})
 
