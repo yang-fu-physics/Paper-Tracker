@@ -47,6 +47,10 @@ AI_MAX_CONCURRENCY = int(os.environ.get("PAPER_AI_MAX_CONCURRENCY", 2))
 AI_MAX_ATTEMPTS = int(os.environ.get("PAPER_AI_MAX_ATTEMPTS", 5))
 AI_RETRY_BASE_DELAY = float(os.environ.get("PAPER_AI_RETRY_BASE_DELAY", 10.0))
 
+# ── 翻译/识别 API 并发 ─────────────────────────────────────────────────────
+# 该上限同时作用于全文翻译和题目/摘要元数据识别 API 调用。
+TRANSLATE_API_MAX_CONCURRENCY = int(os.environ.get("PAPER_TRANSLATE_API_MAX_CONCURRENCY", 2))
+
 # ── doc2x（PDF → LaTeX 转换服务）────────────────────────────────────────
 DOC2X_API_KEY = os.environ.get("PAPER_DOC2X_API_KEY", "your-doc2x-api-key-here")
 DOC2X_BASE_URL = os.environ.get("PAPER_DOC2X_BASE_URL", "https://v2.doc2x.noedgeai.com/api/v2")

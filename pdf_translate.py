@@ -7,6 +7,7 @@ from pathlib import Path
 from stat import S_ISLNK
 
 import config
+from api_concurrency import api_call_slot
 
 logger = logging.getLogger("pdf_translate")
 
@@ -178,31 +179,32 @@ def _translate_chunk(chunk: str, idx: int, total: int, max_retries: int = 3) -> 
     }
     for attempt in range(1, max_retries + 1):
         try:
-            r = requests.post(
-                f"{config.TRANSLATE_BASE_URL}/v1/chat/completions",
-                headers={"Authorization": f"Bearer {config.TRANSLATE_API_KEY}", "Content-Type": "application/json"},
-                json=payload,
-                timeout=(10, 120),  # (connect_timeout, read_timeout per chunk)
-                stream=True,
-            )
-            r.raise_for_status()
-            # collect streamed SSE chunks
-            import json as _json
-            parts = []
-            for line in r.iter_lines(decode_unicode=True):
-                if not line or not line.startswith("data:"):
-                    continue
-                data_str = line[len("data:"):].strip()
-                if data_str == "[DONE]":
-                    break
-                try:
-                    obj = _json.loads(data_str)
-                    delta = obj["choices"][0].get("delta", {})
-                    content = delta.get("content", "")
-                    if content:
-                        parts.append(content)
-                except (_json.JSONDecodeError, KeyError, IndexError):
-                    continue
+            with api_call_slot():
+                r = requests.post(
+                    f"{config.TRANSLATE_BASE_URL}/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {config.TRANSLATE_API_KEY}", "Content-Type": "application/json"},
+                    json=payload,
+                    timeout=(10, 120),  # (connect_timeout, read_timeout per chunk)
+                    stream=True,
+                )
+                r.raise_for_status()
+                # collect streamed SSE chunks
+                import json as _json
+                parts = []
+                for line in r.iter_lines(decode_unicode=True):
+                    if not line or not line.startswith("data:"):
+                        continue
+                    data_str = line[len("data:"):].strip()
+                    if data_str == "[DONE]":
+                        break
+                    try:
+                        obj = _json.loads(data_str)
+                        delta = obj["choices"][0].get("delta", {})
+                        content = delta.get("content", "")
+                        if content:
+                            parts.append(content)
+                    except (_json.JSONDecodeError, KeyError, IndexError):
+                        continue
             result = "".join(parts)
             logger.info(f"[translate] chunk {idx+1}/{total} done ({len(result)} chars)")
             return result

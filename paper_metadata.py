@@ -10,6 +10,7 @@ from typing import Any, Callable
 import requests
 
 import config
+from api_concurrency import api_call_slot
 
 
 class MetadataError(RuntimeError):
@@ -272,7 +273,8 @@ def recognize_metadata(
     last_error: Exception | None = None
     for attempt in range(1, max(1, attempts) + 1):
         try:
-            response = post(endpoint, headers=headers, json=payload, timeout=60)
+            with api_call_slot():
+                response = post(endpoint, headers=headers, json=payload, timeout=60)
             status = getattr(response, "status_code", 200)
             if status == 429 or status >= 500:
                 raise MetadataError(f"metadata API temporary HTTP {status}")
