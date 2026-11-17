@@ -175,9 +175,11 @@ def _translate_chunk(chunk: str, idx: int, total: int, max_retries: int = 3) -> 
             {"role": "user", "content": chunk}
         ],
         "temperature": 0.2,
-        "reasoning_effort": getattr(config, "TRANSLATE_REASONING_EFFORT", "high"),
         "stream": True,
     }
+    reasoning_effort = getattr(config, "TRANSLATE_REASONING_EFFORT", "")
+    if reasoning_effort:
+        payload["reasoning_effort"] = reasoning_effort
     for attempt in range(1, max_retries + 1):
         try:
             with api_call_slot():

@@ -247,7 +247,6 @@ def recognize_metadata(
     payload = {
         "model": model,
         "temperature": 0,
-        "reasoning_effort": getattr(config_module, "TRANSLATE_REASONING_EFFORT", "high"),
         "messages": [
             {
                 "role": "system",
@@ -265,6 +264,9 @@ def recognize_metadata(
             },
         ],
     }
+    reasoning_effort = getattr(config_module, "TRANSLATE_REASONING_EFFORT", "")
+    if reasoning_effort:
+        payload["reasoning_effort"] = reasoning_effort
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"

@@ -22,7 +22,8 @@ FILTER_MODEL = os.environ.get("PAPER_FILTER_MODEL", "")
 TRANSLATE_BASE_URL = os.environ.get("PAPER_TRANSLATE_BASE_URL", "")
 TRANSLATE_API_KEY = os.environ.get("PAPER_TRANSLATE_API_KEY", "your-api-key-here")
 TRANSLATE_MODEL = os.environ.get("PAPER_TRANSLATE_MODEL", "")
-TRANSLATE_REASONING_EFFORT = os.environ.get("PAPER_TRANSLATE_REASONING_EFFORT", "high")
+# Optional provider-specific reasoning level; leave empty for providers that do not support it.
+TRANSLATE_REASONING_EFFORT = os.environ.get("PAPER_TRANSLATE_REASONING_EFFORT", "")
 FILTER_PROMPT = os.environ.get("PAPER_FILTER_PROMPT", """你是一个凝聚态物理专家。任务：
 1. 判定列表中的论文是否与"输运(transport)"或"电子输运"研究相关。相关返回 is_transport=true，否则 false。
 2. 若相关，必须把英文标题和英文摘要精准且完整地翻译为流畅的学术中文。
