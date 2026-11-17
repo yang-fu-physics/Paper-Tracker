@@ -175,6 +175,7 @@ def _translate_chunk(chunk: str, idx: int, total: int, max_retries: int = 3) -> 
             {"role": "user", "content": chunk}
         ],
         "temperature": 0.2,
+        "reasoning_effort": getattr(config, "TRANSLATE_REASONING_EFFORT", "high"),
         "stream": True,
     }
     for attempt in range(1, max_retries + 1):

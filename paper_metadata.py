@@ -247,6 +247,7 @@ def recognize_metadata(
     payload = {
         "model": model,
         "temperature": 0,
+        "reasoning_effort": getattr(config_module, "TRANSLATE_REASONING_EFFORT", "high"),
         "messages": [
             {
                 "role": "system",
